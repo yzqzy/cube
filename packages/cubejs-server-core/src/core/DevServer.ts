@@ -50,13 +50,11 @@ export class DevServer {
     const port = process.env.PORT || 4000; // TODO
     const apiUrl = process.env.CUBEJS_API_URL || `http://localhost:${port}`;
 
-    const auth = process.env.AUTH || false
-    const authDomain = process.env.AUTH_DOMAIN || ''
-    const authPublicKey = process.env.AUTH_PUBLICK_KEY || ''
-    const authSessionKey = process.env.AUTH_SESSION_KEY || `cube_dev_${Date.now()}`
-    const authSessionMaxAge = Number(process.env.AUTH_SEESION_MAX_AGE || 60 * 60 * 1000 * 24)
-
-    console.log('auth:', auth, authDomain, authPublicKey, authSessionKey, authSessionMaxAge)
+    const auth = process.env.CUBEJS_AUTH || false
+    const authDomain = process.env.CUBEJS_AUTH_DOMAIN || ''
+    const authPublicKey = process.env.CUBEJS_AUTH_PUBLIC_KEY || ''
+    const authSessionKey = process.env.CUBEJS_AUTH_SESSION_KEY || `cube_dev_${Date.now()}`
+    const authSessionMaxAge = Number(process.env.CUBEJS_AUTH_SEESION_MAX_AGE || 60 * 60 * 1000 * 24)
 
     // todo: empty/default `apiSecret` in dev mode to allow the DB connection wizard
     const cubejsToken = jwt.sign({}, options.apiSecret || 'secret', { expiresIn: '1d' });
