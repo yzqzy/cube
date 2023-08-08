@@ -4,6 +4,8 @@ import { CubePreAggregationConverter, CubeSchemaConverter, ScaffoldingTemplate, 
 import spawn from 'cross-spawn';
 import path from 'path';
 import fs from 'fs-extra';
+import session from 'express-session'
+
 import { getRequestIdFromRequest } from '@cubejs-backend/api-gateway';
 import { LivePreviewWatcher } from '@cubejs-backend/cloud';
 import { AppContainer, DependencyTree, PackageFetcher, DevPackageFetcher } from '@cubejs-backend/templates';
@@ -48,6 +50,14 @@ export class DevServer {
     const port = process.env.PORT || 4000; // TODO
     const apiUrl = process.env.CUBEJS_API_URL || `http://localhost:${port}`;
 
+    const auth = process.env.AUTH || false
+    const authDomain = process.env.AUTH_DOMAIN || ''
+    const authPublicKey = process.env.AUTH_PUBLICK_KEY || ''
+    const authSessionKey = process.env.AUTH_SESSION_KEY || `cube_dev_${Date.now()}`
+    const authSessionMaxAge = Number(process.env.AUTH_SEESION_MAX_AGE || 60 * 60 * 1000 * 24)
+
+    console.log('auth:', auth, authDomain, authPublicKey, authSessionKey, authSessionMaxAge)
+
     // todo: empty/default `apiSecret` in dev mode to allow the DB connection wizard
     const cubejsToken = jwt.sign({}, options.apiSecret || 'secret', { expiresIn: '1d' });
 
@@ -73,6 +83,36 @@ export class DevServer {
     this.cubejsServer.event('Dev Server Start');
     const serveStatic = require('serve-static');
 
+    const verifiy = (auth: string) => {
+      const data = JSON.parse(Buffer.from(auth, 'base64').toString())
+      const signature = Buffer.from(data['sign'], 'base64')
+    
+      delete data['sign']
+    
+      const verifiableData = Object.keys(data)
+        .sort()
+        .reduce((content, key) => {
+          return content + '&' + key + '=' + encodeURIComponent(data[key])
+        }, '')
+        .substr(1)
+      const publicKey = Buffer.from(
+        `-----BEGIN PUBLIC KEY-----\n${authPublicKey}\n-----END PUBLIC KEY-----`
+      )
+      
+      const verifier = crypto.createVerify('RSA-SHA256')
+  
+      verifier.update(verifiableData)
+      
+      const verified = verifier.verify(publicKey, signature as any, 'hex')
+      const parmas = new URLSearchParams(verifiableData)
+      const user = JSON.parse(parmas.get('auth') || '{}')
+    
+      return {
+        verified,
+        user
+      }
+    }
+
     const catchErrors = (handler) => async (req, res, next) => {
       try {
         await handler(req, res, next);
@@ -82,6 +122,54 @@ export class DevServer {
         res.status(500).json({ error: ((e as Error).stack || e).toString() });
       }
     };
+
+    if (auth) {
+      if (!authDomain) {
+        throw new Error('You have to set auth domain field');
+      }
+      if (!authPublicKey) {
+        throw new Error('You have to set auth publick key field');
+      }
+      if (!authSessionKey) {
+        throw new Error('You have to set auth publick key field');
+      }
+
+      app.use(session({
+        secret: authSessionKey,
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+          maxAge: authSessionMaxAge
+        }
+      }));
+
+      app.get('/sso-callback', (req: any, res: any) => {
+        const { auth } = req.query
+        const { verified, user } = verifiy(auth as string)
+    
+        if (verified && user) {
+          req.session.user = user;
+        }
+    
+        res.redirect('/');
+      })
+      app.get('/sso-redirect', (req, res) => {
+        const sso_redirect_url = `https://login.banmahui.cn/login?redirect_uri=${authDomain}/sso-callback`;
+        res.redirect(sso_redirect_url);
+      })
+      
+      const auth = (req, res, next) => {
+        const user = req.session.user 
+
+        if (!user) {
+          return res.redirect('/sso-redirect')
+        }
+
+        next()
+      }
+      
+      app.use(auth)
+    }
 
     app.get('/playground/context', catchErrors((req, res) => {
       this.cubejsServer.event('Dev Server Env Open');
