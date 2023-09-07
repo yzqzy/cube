@@ -1,4 +1,5 @@
-use crate::cachestore::cache_rocksstore::QueueAddResponse;
+use crate::cachestore::cache_eviction_manager::EvictionResult;
+use crate::cachestore::cache_rocksstore::{CachestoreInfo, QueueAddResponse};
 use crate::cachestore::queue_item::QueueRetrieveResponse;
 use crate::cachestore::{
     CacheItem, CacheStore, QueueItem, QueueItemStatus, QueueKey, QueueResult, QueueResultResponse,
@@ -133,7 +134,7 @@ impl LazyRocksCacheStore {
             }
         };
 
-        trace!("wait_upload_loop unblocked, Cache Store was initialized");
+        trace!("start_processing_loops unblocked, Cache Store was initialized");
 
         store.spawn_processing_loops()
     }
@@ -298,6 +299,18 @@ impl CacheStore for LazyRocksCacheStore {
 
     async fn compaction(&self) -> Result<(), CubeError> {
         self.init().await?.compaction().await
+    }
+
+    async fn info(&self) -> Result<CachestoreInfo, CubeError> {
+        self.init().await?.info().await
+    }
+
+    async fn eviction(&self) -> Result<EvictionResult, CubeError> {
+        self.init().await?.eviction().await
+    }
+
+    async fn persist(&self) -> Result<(), CubeError> {
+        self.init().await?.persist().await
     }
 
     async fn healthcheck(&self) -> Result<(), CubeError> {

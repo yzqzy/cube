@@ -2,7 +2,8 @@ use crate::metastore::rocks_store::TableId;
 use crate::metastore::{
     get_fixed_prefix, BatchPipe, DbTableRef, IdRow, IndexId, KeyVal, MemorySequence,
     MetaStoreEvent, RocksSecondaryIndexValue, RocksSecondaryIndexValueTTLExtended,
-    RocksSecondaryIndexValueVersion, RowKey, SecondaryIndexInfo, TableInfo,
+    RocksSecondaryIndexValueVersion, RocksTableStats, RowKey, SecondaryIndexInfo, SecondaryKey,
+    TableInfo,
 };
 use crate::CubeError;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -174,7 +175,8 @@ pub trait RocksSecondaryIndex<T, K: Hash>: BaseRocksSecondaryIndex<T> {
                     expire,
                     RocksSecondaryIndexValueTTLExtended {
                         lfu: 0,
-                        lru: None,
+                        // Setup currect time as a protection for LRU eviction
+                        lru: Some(Utc::now()),
                         raw_size: self.raw_value_size(row),
                     },
                 )
@@ -349,6 +351,63 @@ where
                     };
 
                     return Some(result);
+                };
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SecondaryIndexValueScanIterItem {
+    pub row_id: u64,
+    pub key_hash: SecondaryKey,
+    pub ttl: Option<DateTime<Utc>>,
+    pub extended: Option<RocksSecondaryIndexValueTTLExtended>,
+}
+
+pub struct SecondaryIndexValueScanIter<'a> {
+    index_id: u32,
+    index_version: RocksSecondaryIndexValueVersion,
+    iter: DBIterator<'a>,
+}
+
+impl<'a> Iterator for SecondaryIndexValueScanIter<'a> {
+    type Item = Result<SecondaryIndexValueScanIterItem, CubeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let option = self.iter.next();
+            if let Some(res) = option {
+                let (key, value) = res.unwrap();
+
+                if let RowKey::SecondaryIndex(index_id, key_hash, row_id) = RowKey::from_bytes(&key)
+                {
+                    if index_id != self.index_id {
+                        return None;
+                    }
+
+                    let secondary_index_value =
+                        match RocksSecondaryIndexValue::from_bytes(&value, self.index_version) {
+                            Ok(r) => r,
+                            Err(err) => return Some(Err(err)),
+                        };
+
+                    let (ttl, extended) = match secondary_index_value {
+                        RocksSecondaryIndexValue::Hash(_) => (None, None),
+                        RocksSecondaryIndexValue::HashAndTTL(_, ttl) => (ttl, None),
+                        RocksSecondaryIndexValue::HashAndTTLExtended(_, ttl, extended) => {
+                            (ttl, Some(extended))
+                        }
+                    };
+
+                    return Some(Ok(SecondaryIndexValueScanIterItem {
+                        key_hash,
+                        row_id,
+                        ttl,
+                        extended,
+                    }));
                 };
             } else {
                 return None;
@@ -877,6 +936,7 @@ pub trait RocksTable: BaseRocksTable + Debug + Send + Sync {
         for row in index_row {
             batch_pipe.batch().put(row.key, row.val);
         }
+
         Ok(IdRow::new(row_id, new_row))
     }
 
@@ -890,6 +950,50 @@ pub trait RocksTable: BaseRocksTable + Debug + Send + Sync {
         }
 
         Ok(())
+    }
+
+    fn update_extended_ttl_secondary_index<'a, K: Debug>(
+        &self,
+        row_id: u64,
+        secondary_index: &'a impl RocksSecondaryIndex<Self::T, K>,
+        secondary_key_hash: SecondaryKey,
+        extended: RocksSecondaryIndexValueTTLExtended,
+        batch_pipe: &mut BatchPipe,
+    ) -> Result<bool, CubeError>
+    where
+        K: Hash,
+    {
+        let index_id = RocksSecondaryIndex::get_id(secondary_index);
+        let secondary_index_row_key =
+            RowKey::SecondaryIndex(Self::index_id(index_id), secondary_key_hash, row_id);
+        let secondary_index_key = secondary_index_row_key.to_bytes();
+
+        if let Some(secondary_key_bytes) = self.db().get(&secondary_index_key)? {
+            let index_value_version = RocksSecondaryIndex::value_version(secondary_index);
+            let new_value = match RocksSecondaryIndexValue::from_bytes(
+                &secondary_key_bytes,
+                index_value_version,
+            )? {
+                RocksSecondaryIndexValue::Hash(hash) => {
+                    RocksSecondaryIndexValue::HashAndTTLExtended(hash, None, extended)
+                }
+                RocksSecondaryIndexValue::HashAndTTL(hash, ttl) => {
+                    RocksSecondaryIndexValue::HashAndTTLExtended(hash, ttl, extended)
+                }
+                RocksSecondaryIndexValue::HashAndTTLExtended(hash, ttl, _) => {
+                    RocksSecondaryIndexValue::HashAndTTLExtended(hash, ttl, extended)
+                }
+            };
+
+            batch_pipe.batch().put(
+                secondary_index_key,
+                new_value.to_bytes(index_value_version)?,
+            );
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn delete(&self, row_id: u64, batch_pipe: &mut BatchPipe) -> Result<IdRow<Self::T>, CubeError> {
@@ -1006,10 +1110,13 @@ pub trait RocksTable: BaseRocksTable + Debug + Send + Sync {
     }
 
     fn insert_index_row(&self, row: &Self::T, row_id: u64) -> Result<Vec<KeyVal>, CubeError> {
-        let mut res = Vec::new();
-        for index in Self::indexes().iter() {
+        let indexes = Self::indexes();
+        let mut res = Vec::with_capacity(indexes.len());
+
+        for index in indexes.iter() {
             res.push(self.index_key_val(row, row_id, index));
         }
+
         Ok(res)
     }
 
@@ -1056,6 +1163,71 @@ pub trait RocksTable: BaseRocksTable + Debug + Send + Sync {
             .into_iter()
             .find(|i| i.get_id() == secondary_index)
             .unwrap()
+    }
+
+    fn collect_table_stats_by_extended_index<'a, K: Debug>(
+        &'a self,
+        secondary_index: &'a impl RocksSecondaryIndex<Self::T, K>,
+        default_size: u64,
+    ) -> Result<RocksTableStats, CubeError>
+    where
+        K: Hash,
+    {
+        let mut keys_total: u32 = 0;
+        let mut expired_keys_total: u32 = 0;
+        let mut size_total: u64 = 0;
+        let mut expired_size_total: u64 = 0;
+        let mut min_row_size: u64 = u64::MAX;
+        let mut avg_row_size: u64 = 0;
+        let mut max_row_size: u64 = u64::MIN;
+
+        let now = Utc::now();
+
+        for item in self.scan_index_values(secondary_index)? {
+            let item = item?;
+
+            let raw_size = if let Some(extended) = item.extended {
+                extended.raw_size as u64
+            } else {
+                default_size
+            };
+
+            keys_total += 1;
+            size_total += raw_size;
+
+            if max_row_size < raw_size {
+                max_row_size = raw_size;
+            }
+
+            if min_row_size > raw_size {
+                min_row_size = raw_size;
+            }
+
+            avg_row_size = (avg_row_size + raw_size) / 2;
+
+            if let Some(ttl) = item.ttl {
+                if ttl < now {
+                    expired_keys_total += 1;
+                    expired_size_total += raw_size;
+                }
+            }
+        }
+
+        if keys_total == 0 {
+            max_row_size = 0;
+            min_row_size = 0;
+        }
+
+        Ok(RocksTableStats {
+            table_name: format!("{:?}", Self::table_id()),
+            keys_total,
+            size_total,
+            expired_keys_total,
+            expired_size_total,
+            min_row_size,
+            max_row_size,
+            avg_row_size,
+        })
     }
 
     fn get_row_ids_from_index(
@@ -1201,6 +1373,31 @@ pub trait RocksTable: BaseRocksTable + Debug + Send + Sync {
 
     fn scan_all_rows<'a>(&'a self) -> Result<TableScanIter<'a, Self>, CubeError> {
         self.table_scan(self.snapshot())
+    }
+
+    fn scan_index_values<'a, K: Debug>(
+        &'a self,
+        secondary_index: &'a impl RocksSecondaryIndex<Self::T, K>,
+    ) -> Result<SecondaryIndexValueScanIter<'a>, CubeError>
+    where
+        K: Hash,
+    {
+        let ref db = self.snapshot();
+
+        let index_id = RocksSecondaryIndex::get_id(secondary_index);
+        let row_key = RowKey::SecondaryIndex(Self::index_id(index_id), vec![], 0);
+
+        let mut opts = ReadOptions::default();
+        opts.set_prefix_same_as_start(false);
+        opts.set_iterate_range(row_key.to_iterate_range());
+
+        let iter = db.iterator_opt(IteratorMode::Start, opts);
+
+        Ok(SecondaryIndexValueScanIter {
+            index_id: Self::index_id(index_id),
+            index_version: RocksSecondaryIndex::value_version(secondary_index),
+            iter,
+        })
     }
 
     fn scan_rows_by_index<'a, K: Debug>(
