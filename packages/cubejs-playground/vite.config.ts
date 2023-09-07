@@ -8,9 +8,13 @@ export default defineConfig(({ mode }) => ({
   },
   server: {
     port: 3080,
+    // proxy: {
+    //   '^/playground/*': 'http://localhost:4000',
+    //   '^/cubejs-api/*': 'http://localhost:4000',
+    // },
     proxy: {
-      '^/playground/*': 'http://localhost:4000',
-      '^/cubejs-api/*': 'http://localhost:4000',
+      '^/playground/*': 'http://cube.banmahui.cn',
+      '^/cubejs-api/*': 'http://cube.banmahui.cn',
     },
   },
   plugins: [react()],

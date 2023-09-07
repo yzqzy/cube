@@ -31,7 +31,6 @@ export function playgroundFetch(url, options: any = {}) {
     });
 }
 
-
 type OpenWindowOptions = {
   url: string;
   width?: number;
@@ -80,4 +79,9 @@ export function openWindow({
   newWindow?.focus?.();
 
   return newWindow;
+}
+
+export function formatParams(params: Record<string, any>) {
+  const searchParams = new URLSearchParams(params);
+  return searchParams.toString();
 }

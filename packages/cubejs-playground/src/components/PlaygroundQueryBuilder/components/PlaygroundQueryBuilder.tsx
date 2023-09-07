@@ -13,8 +13,8 @@ import {
   SchemaChangeProps,
   VizState,
 } from '@cubejs-client/react';
-import { Alert, Col, Row, Space } from 'antd';
-import { SyncOutlined } from '@ant-design/icons';
+import { Alert, Col, Row, Space, message } from 'antd';
+import { SyncOutlined, DownloadOutlined } from '@ant-design/icons';
 import React, { RefObject, useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 
@@ -37,11 +37,15 @@ import SelectChartType from '../../../QueryBuilder/SelectChartType';
 import TimeGroup from '../../../QueryBuilder/TimeGroup';
 import { UIFramework } from '../../../types';
 import { containsPrivateFields, dispatchPlaygroundEvent } from '../../../utils';
+import { request } from '../../../shared/request'
+import { downloadCSV, translateCsvData } from '../../../shared/csv';
+import { formatParams } from '../../../shared/helpers';
 import {
   useChartRendererState,
   useChartRendererStateMethods,
 } from '../../QueryTabs/ChartRendererStateProvider';
 import { PreAggregationStatus } from './PreAggregationStatus';
+
 
 const Section = styled.div`
   display: flex;
@@ -225,6 +229,8 @@ export function PlaygroundQueryBuilder({
   const [framework, setFramework] = useState<UIFramework>('react');
   const [chartingLibrary, setChartingLibrary] = useState<string>('chartjs');
 
+  const [disabled, setDisabled] = useState(false)
+
   useEffect(() => {
     (async () => {
       await refreshToken();
@@ -274,6 +280,45 @@ export function PlaygroundQueryBuilder({
 
     setQueryError(queryId, null);
     queryRef.current = query;
+  }
+
+  function handleDownload({ query }) {
+    setDisabled(true)
+
+    const params = {
+      query: JSON.stringify(Object.assign(query, {
+        limit: 1000 * 10
+      })),
+      queryType: "multi"
+    }
+
+    const error = () => {
+      setDisabled(false)
+      message.error('下载失败，请稍后重试！！！')
+    }
+
+    const next = async (retry = 3) => {
+      const res = await request(`cubejs-api/v1/load?${formatParams(params)}`)
+
+      if (!res.ok || res.json.error) {
+        if (res.json.error === 'Continue wait' && retry) {
+          return setTimeout(next.bind(null, retry - 1), 300);
+        }
+        return error()
+      }
+
+      const data = translateCsvData(res.json.results)
+
+      if (Array.isArray(data)) {
+        while (data.length) {
+          await downloadCSV(data.pop(), `data_${Date.now()}.csv`)
+        }
+      }
+
+      setDisabled(false)
+    }
+
+    next()
   }
 
   if (!tokenRefreshed) {
@@ -494,20 +539,34 @@ export function PlaygroundQueryBuilder({
                     ) : null}
 
                     {resultSetExists && queriesEqual ? (
-                      <Button
-                        icon={<SyncOutlined />}
-                        onClick={async () => {
-                          await refreshToken();
+                      <>
+                        <Button
+                          icon={<SyncOutlined />}
+                          onClick={async () => {
+                            await refreshToken();
 
-                          handleRunButtonClick({
-                            query: validateQuery(query),
-                            pivotConfig,
-                            chartType: chartType || 'line',
-                          });
-                        }}
-                      >
-                        Rerun query
-                      </Button>
+                            handleRunButtonClick({
+                              query: validateQuery(query),
+                              pivotConfig,
+                              chartType: chartType || 'line',
+                            });
+                          }}
+                        >
+                          Rerun query
+                        </Button>
+                        <Button
+                          disabled={disabled}
+                          loading={disabled}
+                          icon={<DownloadOutlined />}
+                          onClick={async () => {
+                            await refreshToken();
+
+                            handleDownload({ query: validateQuery(query) })
+                          }}
+                        >
+                          Download
+                        </Button>
+                      </>
                     ) : null}
                   </Space>
                 </SectionRow>
