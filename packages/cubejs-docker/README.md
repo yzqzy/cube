@@ -67,6 +67,25 @@ documentation for [Environment Variables][link-cubejs-env-vars].
 
 [link-cubejs-env-vars]: https://cube.dev/docs/reference/environment-variables
 
+```bash
+docker run -p 4000:4000 \
+  -p 15432:15432 \
+  -v ${PWD}:/cube/conf \
+  -e CUBEJS_DEV_MODE=true \
+  cubejs-cube
+```
+
+```bash
+docker run -p 4000:4000 \
+  -p 15432:15432 \
+  -v ${PWD}:/cube/conf \
+  -e CUBEJS_DEV_MODE=true \
+  -e AUTH=true \
+  -e AUTH_PUBLIC_KEY=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxRIop/1B6TlKZtWlMDbLvR9lyxgnXvtL75+hrzx1h7UX4DZCz92uEQLd6N9Jhd8oa6dQ3hnZI4DeIHIqoy6gSAlOe4Q0gI9g0kEBVPcSdbqRBQz1+Q+01lH8PTXLgzSUxqF27oUYJfXZq9INGtELfWluxq0utxZ75IYn9MiSrKHOynQN47Ct2itYTQStIkn7QqzzchDUl5iCrMaz53zQCGGyPaQwpwBBYRd/mr4hUpld87quTfF59xa8z1zSgsch/kKXsJ/Dgx84Imhlv+zyFrzQ05aC0qEuPJQi5a39SLTMrkLHsieeXiby1Z1wtfoa0RO7T4/dXOMfpvXu5fTPTQIDAQAB \
+  -e AUTH_DOMAIN=http://chat.banmahui.cn \
+  cubejs-cube
+```
+
 ### Using Docker Compose
 
 ```yaml
