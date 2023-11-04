@@ -96,9 +96,13 @@ declare module '@cubejs-client/core' {
      */
     subscribe?: boolean;
     /**
-     * A Cube.js API instance. If not provided will be taken from `CubeProvider`
+     * A Cube API instance. If not provided will be taken from `CubeProvider`
      */
     cubejsApi?: CubejsApi;
+    /**
+     * If enabled, all members of the 'number' type will be automatically converted to numerical values on the client side
+     */
+    castNumerics?: boolean;
     /**
      * Function that receives `ProgressResult` on each `Continue wait` message.
      */
@@ -149,6 +153,9 @@ declare module '@cubejs-client/core' {
     sortedDimensions: string[];
     sortedTimeDimensions: [[string, string]];
     measureToLeafMeasures?: Record<string, LeafMeasure[]>;
+    ownedDimensions: string[];
+    ownedTimeDimensionsAsIs: [[string, string | null]];
+    ownedTimeDimensionsWithRollupGranularity: [[string, string]];
   };
 
   export type PreAggregationType = 'rollup' | 'rollupJoin' | 'rollupLambda' | 'originalSql';
@@ -770,7 +777,9 @@ declare module '@cubejs-client/core' {
     | 'inDateRange'
     | 'notInDateRange'
     | 'beforeDate'
-    | 'afterDate';
+    | 'beforeOrOnDate'
+    | 'afterDate'
+    | 'afterOrOnDate';
 
   export type TimeDimensionGranularity = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
 

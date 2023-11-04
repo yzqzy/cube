@@ -22,6 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::RwLockWriteGuard;
 
@@ -150,6 +151,7 @@ pub struct CacheEvictionManager {
     // if ttl of a key is less then this value, key will be evicted
     // this help to delete upcoming keys for deleting
     eviction_min_ttl_threshold: u32,
+    compaction_trigger_size: u64,
     // background listener to track events
     _ttl_tl_loop_join_handle: Arc<AbortingJoinHandle<()>>,
 }
@@ -307,6 +309,7 @@ impl CacheEvictionManager {
             eviction_batch_size: config.cachestore_cache_eviction_batch_size(),
             eviction_below_threshold: config.cachestore_cache_eviction_below_threshold(),
             eviction_min_ttl_threshold: config.cachestore_cache_eviction_min_ttl_threshold(),
+            compaction_trigger_size: config.cachestore_cache_compaction_trigger_size(),
             //
             _ttl_tl_loop_join_handle: Arc::new(AbortingJoinHandle::new(join_handle)),
         }
@@ -506,6 +509,8 @@ impl CacheEvictionManager {
             } else {
                 log::trace!("Nothing to evict");
 
+                self.check_compaction_trigger(&store).await;
+
                 return Ok(EvictionResult::Finished(EvictionFinishedResult {
                     total_keys_removed: 0,
                     total_size_removed: 0,
@@ -517,6 +522,8 @@ impl CacheEvictionManager {
         };
 
         let result = eviction_fut.await?;
+
+        self.check_compaction_trigger(&store).await;
 
         log::debug!(
             "Eviction finished, total_keys: {}, total_size: {}",
@@ -1092,6 +1099,37 @@ impl CacheEvictionManager {
             };
 
             Ok((weight, CACHE_ITEM_SIZE_WITHOUT_VALUE))
+        }
+    }
+
+    async fn check_compaction_trigger(&self, store: &Arc<RocksStore>) {
+        let default_cf_metadata = store.db.get_column_family_metadata();
+
+        log::trace!(
+            "Compaction auto trigger, CF default size: {}",
+            humansize::format_size(default_cf_metadata.size, humansize::DECIMAL)
+        );
+
+        if default_cf_metadata.size > self.compaction_trigger_size {
+            log::debug!(
+                "Triggering compaction, CF default size: {} > {}",
+                humansize::format_size(default_cf_metadata.size, humansize::DECIMAL),
+                humansize::format_size(self.compaction_trigger_size, humansize::DECIMAL)
+            );
+
+            let _ = store
+                .read_operation_out_of_queue_opt(
+                    |db_ref| {
+                        let start: Option<&[u8]> = None;
+                        let end: Option<&[u8]> = None;
+
+                        db_ref.db.compact_range(start, end);
+
+                        Ok(())
+                    },
+                    Duration::from_secs(60),
+                )
+                .await;
         }
     }
 }

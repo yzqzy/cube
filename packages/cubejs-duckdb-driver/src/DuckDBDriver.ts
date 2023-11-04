@@ -16,6 +16,7 @@ import { HydrationStream, transformRow } from './HydrationStream';
 export type DuckDBDriverConfiguration = {
   dataSource?: string,
   initSql?: string,
+  schema?: string,
 };
 
 type InitPromise = {
@@ -26,10 +27,14 @@ type InitPromise = {
 export class DuckDBDriver extends BaseDriver implements DriverInterface {
   protected initPromise: Promise<InitPromise> | null = null;
 
+  private schema: string;
+
   public constructor(
     protected readonly config: DuckDBDriverConfiguration = {},
   ) {
     super();
+
+    this.schema = this.config.schema || getEnv('duckdbSchema', this.config);
   }
 
   protected async init(): Promise<InitPromise> {
@@ -85,6 +90,10 @@ export class DuckDBDriver extends BaseDriver implements DriverInterface {
         key: 'memory_limit',
         value: getEnv('duckdbMemoryLimit', this.config),
       },
+      {
+        key: 'schema',
+        value: getEnv('duckdbSchema', this.config),
+      },
     ];
     
     for (const { key, value } of configuration) {
@@ -117,6 +126,26 @@ export class DuckDBDriver extends BaseDriver implements DriverInterface {
       connection,
       db
     };
+  }
+
+  public override informationSchemaQuery(): string {
+    if (this.schema) {
+      return `${super.informationSchemaQuery()} AND table_catalog = '${this.schema}'`;
+    }
+
+    return super.informationSchemaQuery();
+  }
+
+  public override getSchemasQuery(): string {
+    if (this.schema) {
+      return `
+        SELECT table_schema as ${super.quoteIdentifier('schema_name')}
+        FROM information_schema.tables
+        WHERE table_catalog = '${this.schema}'
+        GROUP BY table_schema
+      `;
+    }
+    return super.getSchemasQuery();
   }
 
   protected async getConnection(): Promise<Connection> {

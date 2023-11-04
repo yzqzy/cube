@@ -1,5 +1,5 @@
 source_code = """
-from cube import context_func
+from cube import (context_func, SafeString)
 
 @context_func
 def arg_sum_integers(a, b):
@@ -16,6 +16,40 @@ def arg_str(a):
 @context_func
 def arg_null(a):
   return a
+
+@context_func
+def arg_sum_tuple(tu):
+  return tu[0] + tu[1]
+
+@context_func
+def arg_sum_map(obj):
+  return obj['field_a'] + obj['field_b']
+
+@context_func
+def arg_seq(a):
+  return a
+
+@context_func
+def new_int_tuple():
+  return (1,2)
+
+@context_func
+def new_str_tuple():
+  return ("hello", "word")
+
+@context_func
+def new_safe_string():
+  return SafeString('"safe string" <>')
+
+class MyCustomObject(dict):
+  def __init__(self):
+    self['a_attr'] = "value for attribute a"
+# TODO: We need stable sort for dump
+#     self['b_attr'] = "value for attribute b"
+
+@context_func
+def new_object_from_dict():
+  return MyCustomObject()
 
 @context_func
 def load_data_sync():
@@ -46,6 +80,14 @@ async def load_data():
       ]
     }
     return api_response
+
+class ExampleClassModelB:
+  def get_name_method(self):
+    return "example"
+
+@context_func
+def load_class_model():
+  return ExampleClassModelB()
 """
 
 __execution_context_globals = {}

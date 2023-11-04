@@ -63,6 +63,8 @@ export class SQLServer {
       return this.contextByNativeReq(request, current.securityContext, request.id);
     };
 
+    const canSwitchUserForSession = async (session, user) => session.superuser || canSwitchSqlUser(session.user, user);
+
     this.sqlInterfaceInstance = await registerInterface({
       port: options.sqlPort,
       pgPort: options.pgSqlPort,
@@ -136,7 +138,7 @@ export class SQLServer {
           }
         });
       },
-      sql: async ({ request, session, query, memberToAlias }) => {
+      sql: async ({ request, session, query, memberToAlias, expressionParams }) => {
         const context = await contextByRequest(request, session);
 
         // eslint-disable-next-line no-async-promise-executor
@@ -145,7 +147,9 @@ export class SQLServer {
             await this.apiGateway.sql({
               query,
               memberToAlias,
+              expressionParams,
               exportAnnotatedSql: true,
+              memberExpressions: true,
               queryType: 'multi',
               context,
               res: (message) => {
@@ -191,6 +195,7 @@ export class SQLServer {
           }
         });
       },
+      canSwitchUserForSession: async ({ session, user }) => canSwitchUserForSession(session, user)
     });
   }
 

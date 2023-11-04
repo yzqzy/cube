@@ -49,7 +49,7 @@ import {
 } from './types/auth';
 import {
   Query,
-  NormalizedQuery,
+  NormalizedQuery, MemberExpression,
 } from './types/query';
 import {
   UserBackgroundContext,
@@ -88,6 +88,8 @@ import {
   transformJoins,
   transformPreAggregations,
 } from './helpers/transformMetaExtended';
+
+const memberExpressionRegex = /^([a-zA-Z0-9_]+).([a-zA-Z0-9_]+):\(([a-zA-Z0-9_,]+)\):(.*)$/;
 
 /**
  * API gateway server class.
@@ -1170,18 +1172,23 @@ class ApiGateway {
     return [queryType, normalizedQueries];
   }
 
-  public async sql({ query, context, res, memberToAlias, exportAnnotatedSql }: QueryRequest) {
+  public async sql({ query, context, res, memberToAlias, exportAnnotatedSql, memberExpressions, expressionParams }: QueryRequest) {
     const requestStarted = new Date();
 
     try {
       await this.assertApiScope('data', context.securityContext);
 
       query = this.parseQueryParam(query);
+
+      if (memberExpressions) {
+        query = this.parseMemberExpressionsInQueries(query);
+      }
+
       const [queryType, normalizedQueries] = await this.getNormalizedQueries(query, context);
 
       const sqlQueries = await Promise.all<any>(
         normalizedQueries.map(async (normalizedQuery) => (await this.getCompilerApi(context)).getSql(
-          this.coerceForSqlQuery({ ...normalizedQuery, memberToAlias }, context),
+          this.coerceForSqlQuery({ ...normalizedQuery, memberToAlias, expressionParams }, context),
           {
             includeDebugInfo: getEnv('devMode') || context.signedWithPlaygroundAuthSecret,
             exportAnnotatedSql,
@@ -1201,6 +1208,39 @@ class ApiGateway {
       this.handleError({
         e, context, query, res, requestStarted
       });
+    }
+  }
+
+  private parseMemberExpressionsInQueries(query: Record<string, any> | Record<string, any>[]): Query | Query[] {
+    if (Array.isArray(query)) {
+      return query.map(q => this.parseMemberExpressionsInQuery(<Query>q));
+    } else {
+      return this.parseMemberExpressionsInQuery(<Query>query);
+    }
+  }
+
+  private parseMemberExpressionsInQuery(query: Query): Query {
+    return {
+      ...query,
+      measures: (query.measures || []).map(m => (typeof m === 'string' ? this.parseMemberExpression(m) : m)),
+      dimensions: (query.dimensions || []).map(m => (typeof m === 'string' ? this.parseMemberExpression(m) : m)),
+    };
+  }
+
+  private parseMemberExpression(memberExpression: string): string | MemberExpression {
+    const match = memberExpression.match(memberExpressionRegex);
+    if (match) {
+      const args = match[3].split(',');
+      args.push(`return \`${match[4]}\``);
+      return {
+        cubeName: match[1],
+        name: match[2],
+        expressionName: match[2],
+        expression: Function.constructor.apply(null, args),
+        definition: memberExpression,
+      };
+    } else {
+      return memberExpression;
     }
   }
 
@@ -1651,6 +1691,8 @@ class ApiGateway {
       query = this.parseQueryParam(request.query);
       let resType: ResultType = ResultType.DEFAULT;
 
+      query = this.parseMemberExpressionsInQueries(query);
+
       if (!Array.isArray(query) && query.responseFormat) {
         resType = query.responseFormat;
       }
@@ -2081,7 +2123,7 @@ class ApiGateway {
         }
 
         const jwk = await jwks.getJWKbyKid(
-          typeof options.jwkUrl === 'function' ? options.jwkUrl(decoded) : <string>options.jwkUrl,
+          typeof options.jwkUrl === 'function' ? await options.jwkUrl(decoded) : <string>options.jwkUrl,
           decoded.header.kid
         );
         if (!jwk) {
@@ -2103,14 +2145,9 @@ class ApiGateway {
         try {
           req.securityContext = await checkAuthFn(auth, secret);
           req.signedWithPlaygroundAuthSecret = Boolean(internalOptions?.isPlaygroundCheckAuth);
-        } catch (e) {
-          this.log({
-            type: (e as Error).message,
-            token: auth,
-            error: (e as Error).stack || (e as Error).toString()
-          }, <any>req);
+        } catch (e: any) {
           if (this.enforceSecurityChecks) {
-            throw new CubejsHandlerError(403, 'Forbidden', 'Invalid token');
+            throw new CubejsHandlerError(403, 'Forbidden', 'Invalid token', e);
           }
         }
       } else if (this.enforceSecurityChecks) {
@@ -2230,6 +2267,14 @@ class ApiGateway {
       }
     } catch (e: unknown) {
       if (e instanceof CubejsHandlerError) {
+        const error = e.originalError || e;
+        this.log({
+          type: error.message,
+          url: req.url,
+          token,
+          error: error.stack || error.toString()
+        }, <any>req);
+        
         res.status(e.status).json({ error: e.message });
       } else if (e instanceof Error) {
         this.log({
