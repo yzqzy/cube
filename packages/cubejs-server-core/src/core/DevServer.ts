@@ -93,6 +93,8 @@ export class DevServer {
           return content + '&' + key + '=' + encodeURIComponent(data[key])
         }, '')
         .substr(1)
+        .replace(/%20/gim, '+')
+
       const publicKey = Buffer.from(
         `-----BEGIN PUBLIC KEY-----\n${authPublicKey}\n-----END PUBLIC KEY-----`
       )
