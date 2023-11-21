@@ -34,8 +34,13 @@ declare module '@cubejs-client/react' {
     QueryRecordType,
   } from '@cubejs-client/core';
 
+  type CubeProviderOptions = {
+    castNumerics?: boolean;
+  }
+  
   type CubeProviderProps = {
     cubejsApi: CubejsApi | null;
+    options?: CubeProviderOptions;
     children: React.ReactNode;
   };
 
@@ -69,6 +74,7 @@ declare module '@cubejs-client/react' {
 
   type CubeContextProps = {
     cubejsApi: CubejsApi;
+    options?: CubeProviderOptions;
   };
 
   /**
@@ -451,9 +457,15 @@ declare module '@cubejs-client/react' {
 
   type UseCubeQueryOptions = {
     /**
+     * @deprecated Use the `cubeApi` option
      * A `CubejsApi` instance to use. Taken from the context if the param is not passed
      */
     cubejsApi?: CubejsApi;
+    
+    /**
+     * A `CubejsApi` instance to use. Taken from the context if the param is not passed
+     */
+    cubeApi?: CubejsApi;
     /**
      * Query execution will be skipped when `skip` is set to `true`. You can use this flag to avoid sending incomplete queries.
      */
@@ -466,6 +478,10 @@ declare module '@cubejs-client/react' {
      * When `true` the resultSet will be reset to `null` first
      */
     resetResultSetOnChange?: boolean;
+    /**
+     * If enabled, all members of the 'number' type will be automatically converted to numerical values on the client side
+     */
+    castNumerics?: boolean;
   };
 
   type UseCubeQueryResult<TData> = {
@@ -481,6 +497,7 @@ declare module '@cubejs-client/react' {
    */
   type CubeFetchOptions = {
     skip?: boolean;
+    cubeApi?: CubejsApi;
     cubejsApi?: CubejsApi;
     query?: Query;
   };

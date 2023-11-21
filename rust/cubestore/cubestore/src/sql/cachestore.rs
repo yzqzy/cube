@@ -9,6 +9,7 @@ use crate::sql::parser::{
 use crate::sql::{QueryPlans, SqlQueryContext, SqlService};
 use crate::store::DataFrame;
 use crate::table::{Row, TableValue};
+use crate::util::metrics;
 use crate::{app_metrics, CubeError};
 use async_trait::async_trait;
 use datafusion::sql::parser::Statement as DFStatement;
@@ -174,7 +175,13 @@ impl CacheStoreSqlService {
         _context: SqlQueryContext,
         command: CacheCommand,
     ) -> Result<Arc<DataFrame>, CubeError> {
-        app_metrics::CACHE_QUERIES.increment();
+        app_metrics::CACHE_QUERIES.add_with_tags(
+            1,
+            Some(&vec![metrics::format_tag(
+                "command",
+                command.as_tag_command(),
+            )]),
+        );
         let execution_time = SystemTime::now();
 
         let (result, track_time) = match command {
@@ -268,7 +275,13 @@ impl CacheStoreSqlService {
         _context: SqlQueryContext,
         command: QueueCommand,
     ) -> Result<Arc<DataFrame>, CubeError> {
-        app_metrics::QUEUE_QUERIES.increment();
+        app_metrics::QUEUE_QUERIES.add_with_tags(
+            1,
+            Some(&vec![metrics::format_tag(
+                "command",
+                command.as_tag_command(),
+            )]),
+        );
         let execution_time = SystemTime::now();
 
         let (result, track_time) = match command {
@@ -375,15 +388,17 @@ impl CacheStoreSqlService {
                     .queue_to_cancel(prefix.value, orphaned_timeout, heartbeat_timeout)
                     .await?;
 
-                let columns = vec![Column::new("id".to_string(), ColumnType::String, 0)];
+                let columns = vec![
+                    // id is a path, we cannot change it, because it's breaking change
+                    Column::new("id".to_string(), ColumnType::String, 0),
+                    Column::new("queue_id".to_string(), ColumnType::String, 1),
+                ];
 
                 (
                     Arc::new(DataFrame::new(
                         columns,
                         rows.into_iter()
-                            .map(|item| {
-                                Row::new(vec![TableValue::String(item.get_row().get_key().clone())])
-                            })
+                            .map(|item| QueueItem::queue_to_cancel_row(item))
                             .collect(),
                     )),
                     true,
@@ -401,20 +416,22 @@ impl CacheStoreSqlService {
                     .await?;
 
                 let mut columns = vec![
+                    // id is a path, we cannot change it, because it's breaking change
                     Column::new("id".to_string(), ColumnType::String, 0),
-                    Column::new("status".to_string(), ColumnType::String, 1),
-                    Column::new("extra".to_string(), ColumnType::String, 2),
+                    Column::new("queue_id".to_string(), ColumnType::String, 1),
+                    Column::new("status".to_string(), ColumnType::String, 2),
+                    Column::new("extra".to_string(), ColumnType::String, 3),
                 ];
 
                 if with_payload {
-                    columns.push(Column::new("payload".to_string(), ColumnType::String, 3));
+                    columns.push(Column::new("payload".to_string(), ColumnType::String, 4));
                 }
 
                 (
                     Arc::new(DataFrame::new(
                         columns,
                         rows.into_iter()
-                            .map(|item| item.into_row().into_queue_list_row(with_payload))
+                            .map(|item| QueueItem::queue_list_row(item, with_payload))
                             .collect(),
                     )),
                     true,

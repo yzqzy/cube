@@ -186,7 +186,7 @@ class BaseQuery {
      * @protected
      * @type {ParamAllocator}
      */
-    this.paramAllocator = this.options.paramAllocator || this.newParamAllocator();
+    this.paramAllocator = this.options.paramAllocator || this.newParamAllocator(this.options.expressionParams);
     this.compilerCache = this.compilers.compiler.compilerCache;
     this.queryCache = this.compilerCache.getQueryCache({
       measures: this.options.measures,
@@ -209,6 +209,8 @@ class BaseQuery {
       historyQueries: this.options.historyQueries, // TODO too heavy for key
       ungrouped: this.options.ungrouped,
       memberToAlias: this.options.memberToAlias,
+      expressionParams: this.options.expressionParams,
+      convertTzForRawTimeDimension: this.options.convertTzForRawTimeDimension,
     });
     this.timezone = this.options.timezone;
     this.rowLimit = this.options.rowLimit;
@@ -433,8 +435,8 @@ class BaseQuery {
     return new BaseTimeDimension(this, timeDimension);
   }
 
-  newParamAllocator() {
-    return new ParamAllocator();
+  newParamAllocator(expressionParams) {
+    return new ParamAllocator(expressionParams);
   }
 
   newPreAggregations() {
@@ -1072,8 +1074,16 @@ class BaseQuery {
     return `${dimensionSql} < ${timeStampParam}`;
   }
 
+  beforeOrOnDateFilter(dimensionSql, timeStampParam) {
+    return `${dimensionSql} <= ${timeStampParam}`;
+  }
+
   afterDateFilter(dimensionSql, timeStampParam) {
     return `${dimensionSql} > ${timeStampParam}`;
+  }
+
+  afterOrOnDateFilter(dimensionSql, timeStampParam) {
+    return `${dimensionSql} >= ${timeStampParam}`;
   }
 
   timeStampCast(value) {
@@ -1102,7 +1112,7 @@ class BaseQuery {
         'collectMultipliedMeasures',
         this.queryCache
       );
-      if (m.expressionName && !collectedMeasures.length) {
+      if (m.expressionName && !collectedMeasures.length && !m.isMemberExpression) {
         throw new UserError(`Subquery dimension ${m.expressionName} should reference at least one measure`);
       }
       return [m.measure, collectedMeasures];
@@ -1482,7 +1492,7 @@ class BaseQuery {
       R.map(s => (
         (cache || this.compilerCache).cache(
           ['collectFrom', methodName].concat(
-            s.path() ? [s.path().join('.')] : [s.cube().name, s.expressionName || s.definition().sql]
+            s.path() ? [s.path().join('.')] : [s.cube().name, s.expression?.toString() || s.expressionName || s.definition().sql]
           ),
           () => fn(() => this.traverseSymbol(s))
         )
@@ -1541,7 +1551,7 @@ class BaseQuery {
     let index;
 
     index = this.dimensionsForSelect().findIndex(
-      d => equalIgnoreCase(d.dimension, id)
+      d => equalIgnoreCase(d.dimension, id) || equalIgnoreCase(d.expressionName, id)
     );
 
     if (index > -1) {
@@ -1710,17 +1720,29 @@ class BaseQuery {
     return this.evaluateSymbolContext || {};
   }
 
-  evaluateSymbolSql(cubeName, name, symbol) {
-    this.pushMemberNameForCollectionIfNecessary(cubeName, name);
+  evaluateSymbolSql(cubeName, name, symbol, memberExpressionType) {
+    if (!memberExpressionType) {
+      this.pushMemberNameForCollectionIfNecessary(cubeName, name);
+    }
     const memberPathArray = [cubeName, name];
     const memberPath = this.cubeEvaluator.pathFromArray(memberPathArray);
-    if (this.cubeEvaluator.isMeasure(memberPathArray)) {
+    let type = memberExpressionType;
+    if (!type && this.cubeEvaluator.isMeasure(memberPathArray)) {
+      type = 'measure';
+    }
+    if (!type && this.cubeEvaluator.isDimension(memberPathArray)) {
+      type = 'dimension';
+    }
+    if (!type && this.cubeEvaluator.isSegment(memberPathArray)) {
+      type = 'segment';
+    }
+    if (type === 'measure') {
       let parentMeasure;
       if (this.safeEvaluateSymbolContext().compositeCubeMeasures ||
         this.safeEvaluateSymbolContext().leafMeasures) {
         parentMeasure = this.safeEvaluateSymbolContext().currentMeasure;
         if (this.safeEvaluateSymbolContext().compositeCubeMeasures) {
-          if (parentMeasure &&
+          if (parentMeasure && !memberExpressionType &&
             (
               this.cubeEvaluator.cubeNameFromPath(parentMeasure) !== cubeName ||
               this.newMeasure(this.cubeEvaluator.pathFromArray(memberPathArray)).isCumulative()
@@ -1764,7 +1786,7 @@ class BaseQuery {
         this.safeEvaluateSymbolContext().currentMeasure = parentMeasure;
       }
       return result;
-    } else if (this.cubeEvaluator.isDimension(memberPathArray)) {
+    } else if (type === 'dimension') {
       if ((this.safeEvaluateSymbolContext().renderedReference || {})[memberPath]) {
         return this.evaluateSymbolContext.renderedReference[memberPath];
       }
@@ -1783,9 +1805,17 @@ class BaseQuery {
           this.autoPrefixAndEvaluateSql(cubeName, symbol.longitude.sql)
         ]);
       } else {
-        return this.autoPrefixAndEvaluateSql(cubeName, symbol.sql);
+        let res = this.autoPrefixAndEvaluateSql(cubeName, symbol.sql);
+        if (this.safeEvaluateSymbolContext().convertTzForRawTimeDimension &&
+          !memberExpressionType &&
+          symbol.type === 'time' &&
+          this.cubeEvaluator.byPathAnyType(memberPathArray).ownedByCube
+        ) {
+          res = this.convertTz(res);
+        }
+        return res;
       }
-    } else if (this.cubeEvaluator.isSegment(memberPathArray)) {
+    } else if (type === 'segment') {
       if ((this.safeEvaluateSymbolContext().renderedReference || {})[memberPath]) {
         return this.evaluateSymbolContext.renderedReference[memberPath];
       }
@@ -2386,6 +2416,10 @@ class BaseQuery {
     return false;
   }
 
+  /**
+   * @public
+   * @returns {any}
+   */
   sqlTemplates() {
     return {
       functions: {
@@ -2395,20 +2429,64 @@ class BaseQuery {
         COUNT: 'COUNT({{ args_concat }})',
         COUNT_DISTINCT: 'COUNT(DISTINCT {{ args_concat }})',
         AVG: 'AVG({{ args_concat }})',
+        STDDEV_POP: 'STDDEV_POP({{ args_concat }})',
+        STDDEV_SAMP: 'STDDEV_SAMP({{ args_concat }})',
+        VAR_POP: 'VAR_POP({{ args_concat }})',
+        VAR_SAMP: 'VAR_SAMP({{ args_concat }})',
+        COVAR_POP: 'COVAR_POP({{ args_concat }})',
+        COVAR_SAMP: 'COVAR_SAMP({{ args_concat }})',
 
         COALESCE: 'COALESCE({{ args_concat }})',
+        CONCAT: 'CONCAT({{ args_concat }})',
+        FLOOR: 'FLOOR({{ args_concat }})',
+        CEIL: 'CEIL({{ args_concat }})',
+        TRUNC: 'TRUNC({{ args_concat }})',
+        LEAST: 'LEAST({{ args_concat }})',
+        LOWER: 'LOWER({{ args_concat }})',
+        UPPER: 'UPPER({{ args_concat }})',
+        LEFT: 'LEFT({{ args_concat }})',
+        RIGHT: 'RIGHT({{ args_concat }})',
+        SQRT: 'SQRT({{ args_concat }})',
+        ABS: 'ABS({{ args_concat }})',
+        ACOS: 'ACOS({{ args_concat }})',
+        ASIN: 'ASIN({{ args_concat }})',
+        ATAN: 'ATAN({{ args_concat }})',
+        COS: 'COS({{ args_concat }})',
+        EXP: 'EXP({{ args_concat }})',
+        LN: 'LN({{ args_concat }})',
+        LOG: 'LOG({{ args_concat }})',
+        DLOG10: 'LOG10({{ args_concat }})',
+        PI: 'PI()',
+        POWER: 'POWER({{ args_concat }})',
+        SIN: 'SIN({{ args_concat }})',
+        TAN: 'TAN({{ args_concat }})',
+        REPEAT: 'REPEAT({{ args_concat }})',
+        NULLIF: 'NULLIF({{ args_concat }})',
+        ROUND: 'ROUND({{ args_concat }})',
+        GREATEST: 'GREATEST({{ args_concat }})',
+
+        STDDEV: 'STDDEV_SAMP({{ args_concat }})',
+        SUBSTR: 'SUBSTRING({{ args_concat }})',
       },
       statements: {
         select: 'SELECT {{ select_concat | map(attribute=\'aliased\') | join(\', \') }} \n' +
           'FROM (\n  {{ from }}\n) AS {{ from_alias }} \n' +
           '{% if group_by %} GROUP BY {{ group_by | map(attribute=\'index\') | join(\', \') }}{% endif %}' +
+          '{% if order_by %} ORDER BY {{ order_by | map(attribute=\'expr\') | join(\', \') }}{% endif %}' +
           '{% if limit %}\nLIMIT {{ limit }}{% endif %}' +
           '{% if offset %}\nOFFSET {{ offset }}{% endif %}',
       },
       expressions: {
         column_aliased: '{{expr}} {{quoted_alias}}',
-        case: 'CASE {% if expr %}{{ expr }} {% endif %}{% for when, then in when_then %}WHEN {{ when }} THEN {{ then }}{% endfor %}{% if else_expr %} ELSE {{ else_expr }}{% endif %} END',
-        binary: '{{ left }} {{ op }} {{ right }}'
+        case: 'CASE{% if expr %}{{ expr }} {% endif %}{% for when, then in when_then %} WHEN {{ when }} THEN {{ then }}{% endfor %}{% if else_expr %} ELSE {{ else_expr }}{% endif %} END',
+        is_null: '{{ expr }} IS {% if negate %}NOT {% endif %}NULL',
+        binary: '({{ left }} {{ op }} {{ right }})',
+        sort: '{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}{% if nulls_first %} NULLS FIRST{% endif %}',
+        cast: 'CAST({{ expr }} AS {{ data_type }})',
+        window_function: '{{ fun_call }} OVER ({% if partition_by_concat %}PARTITION BY {{ partition_by_concat }}{% if order_by_concat %} {% endif %}{% endif %}{% if order_by_concat %}ORDER BY {{ order_by_concat }}{% endif %})',
+        in_list: '{{ expr }} {% if negated %}NOT {% endif %}IN ({{ in_exprs_concat }})',
+        negative: '-({{ expr }})',
+        not: 'NOT ({{ expr }})',
       },
       quotes: {
         identifiers: '"',
@@ -2641,7 +2719,7 @@ class BaseQuery {
     return `SELECT ${sql} as refresh_key`;
   }
 
-  preAggregationInvalidateKeyQueries(cube, preAggregation) {
+  preAggregationInvalidateKeyQueries(cube, preAggregation, preAggregationName) {
     return this.cacheValue(
       ['preAggregationInvalidateKeyQueries', cube, JSON.stringify(preAggregation)],
       () => {
@@ -2665,7 +2743,7 @@ class BaseQuery {
           const renewalThreshold = this.refreshKeyRenewalThresholdForInterval(preAggregation.refreshKey);
           if (preAggregation.refreshKey.incremental) {
             if (!preAggregation.partitionGranularity) {
-              throw new UserError('Incremental refresh key can only be used for partitioned pre-aggregations');
+              throw new UserError(`Incremental refresh key can only be used for partitioned pre-aggregations but set for non-partitioned '${cube}.${preAggregationName}'`);
             }
             // TODO Case when partitioned originalSql is resolved for query without time dimension.
             // Consider fallback to not using such originalSql for consistency?

@@ -6,7 +6,8 @@ export class BaseMeasure {
     if (measure.expression) {
       this.expression = measure.expression;
       this.expressionCubeName = measure.cubeName;
-      this.expressionName = `${measure.cubeName}.${measure.name}`;
+      this.expressionName = measure.expressionName || `${measure.cubeName}.${measure.name}`;
+      this.isMemberExpression = !!measure.definition;
     }
     this.measure = measure;
   }
@@ -38,7 +39,7 @@ export class BaseMeasure {
 
   measureSql() {
     if (this.expression) {
-      return this.query.evaluateSql(this.expressionCubeName, this.expression);
+      return this.query.evaluateSymbolSql(this.expressionCubeName, this.expressionName, this.definition(), 'measure');
     }
     return this.query.measureSql(this);
   }
@@ -58,6 +59,7 @@ export class BaseMeasure {
     if (this.expression) {
       return {
         sql: this.expression,
+        // TODO use actual measure type even though it isn't used right now
         type: 'number'
       };
     }
@@ -161,5 +163,12 @@ export class BaseMeasure {
       return null;
     }
     return this.query.cubeEvaluator.parsePath('measures', this.measure);
+  }
+
+  expressionPath() {
+    if (this.expression) {
+      return `expr:${this.expression.expressionName}`;
+    }
+    return this.query.cubeEvaluator.pathFromArray(this.path());
   }
 }

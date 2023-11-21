@@ -48,6 +48,7 @@ export interface SqlPayload {
     session: SessionContext,
     query: any,
     memberToAlias: Record<string, string>,
+    expressionParams: string[],
 }
 
 export interface SqlApiLoadPayload {
@@ -63,6 +64,11 @@ export interface MetaPayload {
     session: SessionContext,
 }
 
+export interface CanSwitchUserPayload {
+  session: SessionContext,
+  user: string,
+}
+
 export type SQLInterfaceOptions = {
     port?: number,
     pgPort?: number,
@@ -74,6 +80,7 @@ export type SQLInterfaceOptions = {
     stream: (payload: LoadPayload) => unknown | Promise<unknown>,
     sqlApiLoad: (payload: SqlApiLoadPayload) => unknown | Promise<unknown>,
     sqlGenerators: (paramsJson: string) => unknown | Promise<unknown>,
+    canSwitchUserForSession: (payload: CanSwitchUserPayload) => unknown | Promise<unknown>,
 };
 
 function loadNative() {
@@ -299,6 +306,7 @@ export const registerInterface = async (options: SQLInterfaceOptions): Promise<S
     stream: wrapNativeFunctionWithStream(options.stream),
     sqlApiLoad: wrapNativeFunctionWithStream(options.sqlApiLoad),
     sqlGenerators: wrapRawNativeFunctionWithChannelCallback(options.sqlGenerators),
+    canSwitchUserForSession: wrapRawNativeFunctionWithChannelCallback(options.canSwitchUserForSession),
   });
 };
 
@@ -312,6 +320,7 @@ export const shutdownInterface = async (instance: SqlInterfaceInstance): Promise
 
 export interface PyConfiguration {
     repositoryFactory?: (ctx: unknown) => Promise<unknown>,
+    logger?: (msg: string, params: Record<string, any>) => void,
     checkAuth?: (req: unknown, authorization: string) => Promise<void>
     queryRewrite?: (query: unknown, ctx: unknown) => Promise<unknown>
     contextToApiScopes?: () => Promise<string[]>
@@ -347,18 +356,35 @@ export const pythonLoadConfig = async (content: string, options: { fileName: str
     });
   }
 
+  if (config.logger) {
+    const nativeLogger = config.logger;
+    config.logger = (msg: string, params: Record<string, any>) => {
+      nativeLogger(msg, params).catch((e: any) => {
+        console.error(e);
+      });
+    };
+  }
+
   return config;
 };
 
 export type PythonCtx = {
     __type: 'PythonCtx'
 } & {
-    [key: string]: Function
+  filters: Record<string, Function>
+  functions: Record<string, Function>
+  variables: Record<string, any>
+};
+
+export type JinjaEngineOptions = {
+  debugInfo?: boolean,
+  filters: Record<string, Function>,
+  workers: number
 };
 
 export interface JinjaEngine {
     loadTemplate(templateName: string, templateContent: string): void;
-    renderTemplate(templateName: string, context: unknown, pythonContext: PythonCtx | null): string;
+    renderTemplate(templateName: string, context: unknown, pythonContext: Record<string, any> | null): Promise<string>;
 }
 
 export class NativeInstance {
@@ -374,17 +400,16 @@ export class NativeInstance {
       return this.native;
     }
 
-    public newJinjaEngine(options: { debugInfo?: boolean }): JinjaEngine {
-      if (isFallbackBuild()) {
-        throw new Error('Python (newJinjaEngine) is not supported in fallback build');
-      }
-
+    public newJinjaEngine(options: JinjaEngineOptions): JinjaEngine {
       return this.getNative().newJinjaEngine(options);
     }
 
     public loadPythonContext(fileName: string, content: unknown): Promise<PythonCtx> {
       if (isFallbackBuild()) {
-        throw new Error('Python (loadPythonContext) is not supported in fallback build');
+        throw new Error(
+          'Python (loadPythonContext) is not supported because you are using the fallback build of native extension. Read more: ' +
+          'https://github.com/cube-js/cube/blob/master/packages/cubejs-backend-native/README.md#supported-architectures-and-platforms'
+        );
       }
 
       return this.getNative().pythonLoadModel(fileName, content);

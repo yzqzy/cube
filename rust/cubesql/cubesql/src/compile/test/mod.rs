@@ -9,6 +9,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 
 use crate::{
     compile::engine::df::{scan::MemberField, wrapper::SqlQuery},
+    config::{ConfigObj, ConfigObjImpl},
     sql::{
         session::DatabaseProtocol, AuthContextRef, AuthenticateResponse, HttpAuthContext,
         ServerManager, Session, SessionManager, SqlAuthService,
@@ -207,11 +208,18 @@ pub fn get_test_tenant_ctx() -> Arc<MetaContext> {
                         "functions/COUNT_DISTINCT".to_string(),
                         "COUNT(DISTINCT {{ args_concat }})".to_string(),
                     ),
+                    ("functions/DATETRUNC".to_string(), "DATE_TRUNC({{ args_concat }})".to_string()),
+                    ("functions/DATEPART".to_string(), "DATE_PART({{ args_concat }})".to_string()),
+                    ("functions/FLOOR".to_string(), "FLOOR({{ args_concat }})".to_string()),
+                    ("functions/TRUNC".to_string(), "TRUNC({{ args_concat }})".to_string()),
+                    ("functions/LEAST".to_string(), "LEAST({{ args_concat }})".to_string()),
+                    ("expressions/extract".to_string(), "EXTRACT({{ date_part }} FROM {{ expr }})".to_string()),
                     (
                         "statements/select".to_string(),
                         r#"SELECT {{ select_concat | map(attribute='aliased') | join(', ') }} 
   FROM ({{ from }}) AS {{ from_alias }} 
-  {% if group_by %} GROUP BY {{ group_by | map(attribute='index') | join(', ') }}{% endif %}{% if limit %}
+  {% if group_by %} GROUP BY {{ group_by | map(attribute='index') | join(', ') }}{% endif %}
+  {% if order_by %} ORDER BY {{ order_by | map(attribute='expr') | join(', ') }}{% endif %}{% if limit %}
   LIMIT {{ limit }}{% endif %}{% if offset %}
   OFFSET {{ offset }}{% endif %}"#.to_string(),
                     ),
@@ -220,7 +228,15 @@ pub fn get_test_tenant_ctx() -> Arc<MetaContext> {
                         "{{expr}} {{quoted_alias}}".to_string(),
                     ),
                     ("expressions/binary".to_string(), "{{ left }} {{ op }} {{ right }}".to_string()),
-                    ("expressions/case".to_string(), "CASE {% if expr %}{{ expr }} {% endif %}{% for when, then in when_then %}WHEN {{ when }} THEN {{ then }}{% endfor %}{% if else_expr %} ELSE {{ else_expr }}{% endif %} END".to_string()),
+                    ("expressions/is_null".to_string(), "{{ expr }} IS {% if negate %}NOT {% endif %}NULL".to_string()),
+                    ("expressions/case".to_string(), "CASE{% if expr %}{{ expr }} {% endif %}{% for when, then in when_then %} WHEN {{ when }} THEN {{ then }}{% endfor %}{% if else_expr %} ELSE {{ else_expr }}{% endif %} END".to_string()),
+                    ("expressions/sort".to_string(), "{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}{% if nulls_first %} NULLS FIRST {% endif %}".to_string()),
+                    ("expressions/cast".to_string(), "CAST({{ expr }} AS {{ data_type }})".to_string()),
+                    ("expressions/interval".to_string(), "INTERVAL '{{ interval }}'".to_string()),
+                    ("expressions/window_function".to_string(), "{{ fun_call }} OVER ({% if partition_by %}PARTITION BY {{ partition_by }}{% if order_by %} {% endif %}{% endif %}{% if order_by %}ORDER BY {{ order_by }}{% endif %})".to_string()),
+                    ("expressions/in_list".to_string(), "{{ expr }} {% if negated %}NOT {% endif %}IN ({{ in_exprs_concat }})".to_string()),
+                    ("expressions/negative".to_string(), "-({{ expr }})".to_string()),
+                    ("expressions/not".to_string(), "NOT ({{ expr }})".to_string()),
                     ("quotes/identifiers".to_string(), "\"".to_string()),
                     ("quotes/escape".to_string(), "\"\"".to_string()),
                     ("params/param".to_string(), "${{ param_index + 1 }}".to_string())
@@ -255,10 +271,18 @@ pub fn get_test_tenant_ctx_with_meta(meta: Vec<V1CubeMeta>) -> Arc<MetaContext> 
 }
 
 pub async fn get_test_session(protocol: DatabaseProtocol) -> Arc<Session> {
+    get_test_session_with_config(protocol, Arc::new(ConfigObjImpl::default())).await
+}
+
+pub async fn get_test_session_with_config(
+    protocol: DatabaseProtocol,
+    config_obj: Arc<dyn ConfigObj>,
+) -> Arc<Session> {
     let server = Arc::new(ServerManager::new(
         get_test_auth(),
         get_test_transport(),
         None,
+        config_obj,
     ));
 
     let db_name = match &protocol {
@@ -320,13 +344,17 @@ pub fn get_test_transport() -> Arc<dyn TransportService> {
 
         async fn sql(
             &self,
-            _query: V1LoadRequestQuery,
+            query: V1LoadRequestQuery,
             _ctx: AuthContextRef,
             _meta_fields: LoadRequestMeta,
             _member_to_alias: Option<HashMap<String, String>>,
+            expression_params: Option<Vec<Option<String>>>,
         ) -> Result<SqlResponse, CubeError> {
             Ok(SqlResponse {
-                sql: SqlQuery::new("SELECT 1".to_string(), vec![]),
+                sql: SqlQuery::new(
+                    format!("SELECT * FROM {}", serde_json::to_string(&query).unwrap()),
+                    expression_params.unwrap_or(Vec::new()),
+                ),
             })
         }
 
@@ -351,6 +379,18 @@ pub fn get_test_transport() -> Arc<dyn TransportService> {
             _member_fields: Vec<MemberField>,
         ) -> Result<CubeStreamReceiver, CubeError> {
             panic!("It's a fake transport");
+        }
+
+        async fn can_switch_user_for_session(
+            &self,
+            _ctx: AuthContextRef,
+            to_user: String,
+        ) -> Result<bool, CubeError> {
+            if to_user == "good_user" {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 

@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::auth::NativeAuthContext;
 use crate::channel::{call_raw_js_with_channel_as_callback, NodeSqlGenerator};
+use crate::node_obj_serializer::NodeObjSerializer;
 use crate::{
     auth::TransportRequest, channel::call_js_with_channel_as_callback,
     stream::call_js_with_stream_as_callback,
@@ -33,6 +34,7 @@ pub struct NodeBridgeTransport {
     on_sql: Arc<Root<JsFunction>>,
     on_meta: Arc<Root<JsFunction>>,
     sql_generators: Arc<Root<JsFunction>>,
+    can_switch_user_for_session: Arc<Root<JsFunction>>,
 }
 
 impl NodeBridgeTransport {
@@ -42,6 +44,7 @@ impl NodeBridgeTransport {
         on_sql: Root<JsFunction>,
         on_meta: Root<JsFunction>,
         sql_generators: Root<JsFunction>,
+        can_switch_user_for_session: Root<JsFunction>,
     ) -> Self {
         Self {
             channel: Arc::new(channel),
@@ -49,6 +52,7 @@ impl NodeBridgeTransport {
             on_sql: Arc::new(on_sql),
             on_meta: Arc::new(on_meta),
             sql_generators: Arc::new(sql_generators),
+            can_switch_user_for_session: Arc::new(can_switch_user_for_session),
         }
     }
 }
@@ -60,6 +64,12 @@ struct SessionContext {
 }
 
 #[derive(Debug, Serialize)]
+struct CanSwitchUserForSessionRequest {
+    session: SessionContext,
+    user: String,
+}
+
+#[derive(Debug, Serialize)]
 struct LoadRequest {
     request: TransportRequest,
     query: V1LoadRequestQuery,
@@ -68,6 +78,8 @@ struct LoadRequest {
     session: SessionContext,
     #[serde(rename = "memberToAlias", skip_serializing_if = "Option::is_none")]
     member_to_alias: Option<HashMap<String, String>>,
+    #[serde(rename = "expressionParams", skip_serializing_if = "Option::is_none")]
+    expression_params: Option<Vec<Option<String>>>,
     streaming: bool,
 }
 
@@ -117,7 +129,7 @@ impl TransportService for NodeBridgeTransport {
                 self.channel.clone(),
                 self.sql_generators.clone(),
                 extra,
-                Box::new(|cx, v| cx.string(v).as_value(cx)),
+                Box::new(|cx, v| Ok(cx.string(v).as_value(cx))),
                 Box::new(move |cx, v| {
                     let obj = v
                         .downcast::<JsObject, _>(cx)
@@ -176,6 +188,7 @@ impl TransportService for NodeBridgeTransport {
         ctx: AuthContextRef,
         meta: LoadRequestMeta,
         member_to_alias: Option<HashMap<String, String>>,
+        expression_params: Option<Vec<Option<String>>>,
     ) -> Result<SqlResponse, CubeError> {
         let native_auth = ctx
             .as_any()
@@ -196,6 +209,7 @@ impl TransportService for NodeBridgeTransport {
             },
             sql_query: None,
             member_to_alias,
+            expression_params,
             streaming: false,
         })?;
 
@@ -269,6 +283,7 @@ impl TransportService for NodeBridgeTransport {
                 },
                 sql_query: sql_query.clone().map(|q| (q.sql, q.values)),
                 member_to_alias: None,
+                expression_params: None,
                 streaming: false,
             })?;
 
@@ -345,6 +360,7 @@ impl TransportService for NodeBridgeTransport {
                     superuser: native_auth.superuser,
                 },
                 member_to_alias: None,
+                expression_params: None,
                 streaming: true,
             })?;
 
@@ -366,6 +382,41 @@ impl TransportService for NodeBridgeTransport {
 
             break res;
         }
+    }
+
+    async fn can_switch_user_for_session(
+        &self,
+        ctx: AuthContextRef,
+        to_user: String,
+    ) -> Result<bool, CubeError> {
+        let native_auth = ctx
+            .as_any()
+            .downcast_ref::<NativeAuthContext>()
+            .expect("Unable to cast AuthContext to NativeAuthContext");
+
+        let res = call_raw_js_with_channel_as_callback(
+            self.channel.clone(),
+            self.can_switch_user_for_session.clone(),
+            CanSwitchUserForSessionRequest {
+                user: to_user,
+                session: SessionContext {
+                    user: native_auth.user.clone(),
+                    superuser: native_auth.superuser,
+                },
+            },
+            Box::new(|cx, v| match NodeObjSerializer::serialize(&v, cx) {
+                Ok(res) => Ok(res),
+                Err(e) => cx.throw_error(format!("Can't serialize to node obj: {}", e)),
+            }),
+            Box::new(move |cx, v| {
+                let obj = v
+                    .downcast::<JsBoolean, _>(cx)
+                    .map_err(|e| CubeError::user(e.to_string()))?;
+                Ok(obj.value(cx))
+            }),
+        )
+        .await?;
+        Ok(res)
     }
 }
 

@@ -588,6 +588,16 @@ const variables: Record<string, (...args: any) => any> = {
     .default('true')
     .asBoolStrict(),
 
+  /**
+   * Fetch Columns by Ordinal Position
+   *
+   * Currently defaults to 'false' as changing this in a live deployment could break existing pre-aggregations.
+   * This will eventually default to true.
+   */
+  fetchColumnsByOrdinalPosition: (): boolean => get('CUBEJS_DB_FETCH_COLUMNS_BY_ORDINAL_POSITION')
+    .default('false')
+    .asBoolStrict(),
+
   /** ****************************************************************
    * JDBC options                                                    *
    ***************************************************************** */
@@ -1419,6 +1429,16 @@ const variables: Record<string, (...args: any) => any> = {
     ]
   ),
 
+  duckdbSchema: ({
+    dataSource
+  }: {
+    dataSource: string,
+  }) => (
+    process.env[
+      keyByDataSource('CUBEJS_DB_DUCKDB_SCHEMA', dataSource)
+    ]
+  ),
+
   /**
    * Presto catalog.
    */
@@ -1640,7 +1660,8 @@ const variables: Record<string, (...args: any) => any> = {
     .asInt(),
   maxSourceRowLimit: () => get('CUBEJS_MAX_SOURCE_ROW_LIMIT')
     .default(200000)
-    .asInt()
+    .asInt(),
+  convertTzForRawTimeDimension: () => get('CUBESQL_SQL_PUSH_DOWN').default('false').asBoolStrict(),
 };
 
 type Vars = typeof variables;

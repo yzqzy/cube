@@ -10,7 +10,8 @@ use cubeclient::models::{V1LoadRequestQuery, V1LoadResult, V1LoadResultAnnotatio
 pub use datafusion::{
     arrow::{
         array::{
-            ArrayRef, BooleanBuilder, Date32Builder, Float64Builder, Int64Builder, StringBuilder,
+            ArrayRef, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder, Int64Builder,
+            StringBuilder,
         },
         datatypes::{DataType, SchemaRef},
         error::{ArrowError, Result as ArrowResult},
@@ -139,6 +140,7 @@ pub struct WrappedSelectNode {
     pub projection_expr: Vec<Expr>,
     pub group_expr: Vec<Expr>,
     pub aggr_expr: Vec<Expr>,
+    pub window_expr: Vec<Expr>,
     pub from: Arc<LogicalPlan>,
     pub joins: Vec<(Arc<LogicalPlan>, Expr, JoinType)>,
     pub filter_expr: Vec<Expr>,
@@ -147,6 +149,7 @@ pub struct WrappedSelectNode {
     pub offset: Option<usize>,
     pub order_expr: Vec<Expr>,
     pub alias: Option<String>,
+    pub ungrouped: bool,
 }
 
 impl WrappedSelectNode {
@@ -156,6 +159,7 @@ impl WrappedSelectNode {
         projection_expr: Vec<Expr>,
         group_expr: Vec<Expr>,
         aggr_expr: Vec<Expr>,
+        window_expr: Vec<Expr>,
         from: Arc<LogicalPlan>,
         joins: Vec<(Arc<LogicalPlan>, Expr, JoinType)>,
         filter_expr: Vec<Expr>,
@@ -164,6 +168,7 @@ impl WrappedSelectNode {
         offset: Option<usize>,
         order_expr: Vec<Expr>,
         alias: Option<String>,
+        ungrouped: bool,
     ) -> Self {
         Self {
             schema,
@@ -171,6 +176,7 @@ impl WrappedSelectNode {
             projection_expr,
             group_expr,
             aggr_expr,
+            window_expr,
             from,
             joins,
             filter_expr,
@@ -179,6 +185,7 @@ impl WrappedSelectNode {
             offset,
             order_expr,
             alias,
+            ungrouped,
         }
     }
 }
@@ -203,6 +210,7 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
         exprs.extend(self.projection_expr.clone());
         exprs.extend(self.group_expr.clone());
         exprs.extend(self.aggr_expr.clone());
+        exprs.extend(self.window_expr.clone());
         exprs.extend(self.joins.iter().map(|(_, expr, _)| expr.clone()));
         exprs.extend(self.filter_expr.clone());
         exprs.extend(self.having_expr.clone());
@@ -213,11 +221,12 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "WrappedSelect: select_type={:?}, projection_expr={:?}, group_expr={:?}, aggregate_expr={:?}, from={:?}, joins={:?}, filter_expr={:?}, having_expr={:?}, limit={:?}, offset={:?}, order_expr={:?}, alias={:?}",
+            "WrappedSelect: select_type={:?}, projection_expr={:?}, group_expr={:?}, aggregate_expr={:?}, window_expr={:?}, from={:?}, joins={:?}, filter_expr={:?}, having_expr={:?}, limit={:?}, offset={:?}, order_expr={:?}, alias={:?}",
             self.select_type,
             self.projection_expr,
             self.group_expr,
             self.aggr_expr,
+            self.window_expr,
             self.from,
             self.joins,
             self.filter_expr,
@@ -257,6 +266,7 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
         let mut projection_expr = vec![];
         let mut group_expr = vec![];
         let mut aggregate_expr = vec![];
+        let mut window_expr = vec![];
         let limit = None;
         let offset = None;
         let alias = None;
@@ -272,6 +282,10 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
 
         for _ in self.aggr_expr.iter() {
             aggregate_expr.push(exprs_iter.next().unwrap().clone());
+        }
+
+        for _ in self.window_expr.iter() {
+            window_expr.push(exprs_iter.next().unwrap().clone());
         }
 
         for _ in self.joins.iter() {
@@ -296,6 +310,7 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
             projection_expr,
             group_expr,
             aggregate_expr,
+            window_expr,
             from,
             joins
                 .into_iter()
@@ -309,6 +324,7 @@ impl UserDefinedLogicalNode for WrappedSelectNode {
             offset,
             order_expr,
             alias,
+            self.ungrouped,
         ))
     }
 }
@@ -360,16 +376,16 @@ impl ExtensionPlanner for CubeScanExtensionPlanner {
                         )))?;
 
                 let schema = SchemaRef::new(wrapper_node.schema().as_ref().into());
-                let member_fields = schema
-                    .fields()
-                    .iter()
-                    .map(|f| MemberField::Member(f.name().to_string()))
-                    .collect();
                 Some(Arc::new(CubeScanExecutionPlan {
                     schema,
-                    member_fields,
+                    member_fields: wrapper_node.member_fields.as_ref().ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "Member fields are not set for wrapper node. Optimization wasn't performed: {:?}",
+                            wrapper_node
+                        ))
+                    })?.clone(),
                     transport: self.transport.clone(),
-                    request: scan_node.request.clone(),
+                    request: wrapper_node.request.clone().unwrap_or(scan_node.request.clone()),
                     wrapped_sql: Some(wrapper_node.wrapped_sql.as_ref().ok_or_else(|| {
                         DataFusionError::Internal(format!(
                             "Wrapped SQL is not set for wrapper node. Optimization wasn't performed: {:?}",
@@ -892,6 +908,31 @@ pub fn transform_response<V: ValueObject>(
                     }
                 )
             }
+            DataType::Int32 => {
+                build_column!(
+                    DataType::Int32,
+                    Int32Builder,
+                    response,
+                    field_name,
+                    {
+                        (FieldValue::Number(number), builder) => builder.append_value(number.round() as i32)?,
+                        (FieldValue::String(s), builder) => match s.parse::<i32>() {
+                            Ok(v) => builder.append_value(v)?,
+                            Err(error) => {
+                                warn!(
+                                    "Unable to parse value as i32: {}",
+                                    error.to_string()
+                                );
+
+                                builder.append_null()?
+                            }
+                        },
+                    },
+                    {
+                        (ScalarValue::Int32(v), builder) => builder.append_option(v.clone())?,
+                    }
+                )
+            }
             DataType::Int64 => {
                 build_column!(
                     DataType::Int64,
@@ -975,6 +1016,7 @@ pub fn transform_response<V: ValueObject>(
                         (FieldValue::String(s), builder) => {
                             let timestamp = NaiveDateTime::parse_from_str(s.as_str(), "%Y-%m-%dT%H:%M:%S.%f")
                                 .or_else(|_| NaiveDateTime::parse_from_str(s.as_str(), "%Y-%m-%d %H:%M:%S.%f"))
+                                .or_else(|_| NaiveDateTime::parse_from_str(s.as_str(), "%Y-%m-%dT%H:%M:%S"))
                                 .map_err(|e| {
                                     DataFusionError::Execution(format!(
                                         "Can't parse timestamp: '{}': {}",
@@ -1094,6 +1136,7 @@ mod tests {
                 _ctx: AuthContextRef,
                 _meta_fields: LoadRequestMeta,
                 _member_to_alias: Option<HashMap<String, String>>,
+                _expression_params: Option<Vec<Option<String>>>,
             ) -> Result<SqlResponse, CubeError> {
                 todo!()
             }
@@ -1143,6 +1186,14 @@ mod tests {
                 _schema: SchemaRef,
                 _member_fields: Vec<MemberField>,
             ) -> Result<CubeStreamReceiver, CubeError> {
+                panic!("It's a fake transport");
+            }
+
+            async fn can_switch_user_for_session(
+                &self,
+                _ctx: AuthContextRef,
+                _to_user: String,
+            ) -> Result<bool, CubeError> {
                 panic!("It's a fake transport");
             }
         }

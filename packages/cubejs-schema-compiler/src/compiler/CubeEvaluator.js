@@ -7,7 +7,7 @@ import { BaseQuery } from '../adapter';
 
 export class CubeEvaluator extends CubeSymbols {
   constructor(cubeValidator) {
-    super(cubeValidator);
+    super(true);
     this.cubeValidator = cubeValidator;
     this.evaluatedCubes = {};
     this.primaryKeys = {};
@@ -42,7 +42,6 @@ export class CubeEvaluator extends CubeSymbols {
     this.prepareMembers(cube.measures, cube, errorReporter);
     this.prepareMembers(cube.dimensions, cube, errorReporter);
     this.prepareMembers(cube.segments, cube, errorReporter);
-    this.prepareIncludes(cube, errorReporter);
   }
 
   /**
@@ -139,17 +138,23 @@ export class CubeEvaluator extends CubeSymbols {
 
     for (const memberName of Object.keys(members)) {
       let ownedByCube = true;
+      let aliasMember;
 
       const member = members[memberName];
       if (member.sql && !member.subQuery) {
         const funcArgs = this.funcArguments(member.sql);
-        const cubeReferences = this.collectUsedCubeReferences(cube.name, member.sql);
+        const { cubeReferencesUsed, evaluatedSql, pathReferencesUsed } = this.collectUsedCubeReferences(cube.name, member.sql);
         // We won't check for FILTER_PARAMS here as it shouldn't affect ownership and it should obey the same reference rules.
         // To affect ownership FILTER_PARAMS can be declared as `${FILTER_PARAMS.Foo.bar.filter(`${Foo.bar}`)}`.
-        if (funcArgs.length > 0 && cubeReferences.length === 0) {
+        // It isn't owned if there are non {CUBE} references
+        if (funcArgs.length > 0 && cubeReferencesUsed.length === 0) {
           ownedByCube = false;
         }
-        const foreignCubes = cubeReferences.filter(usedCube => usedCube !== cube.name);
+        // Aliases one to one some another member as in case of views
+        if (!ownedByCube && !member.filters && BaseQuery.isCalculatedMeasureType(member.type) && pathReferencesUsed.length === 1 && this.pathFromArray(pathReferencesUsed[0]) === evaluatedSql) {
+          aliasMember = this.pathFromArray(pathReferencesUsed[0]);
+        }
+        const foreignCubes = cubeReferencesUsed.filter(usedCube => usedCube !== cube.name);
         if (foreignCubes.length > 0) {
           errorReporter.error(`Member '${cube.name}.${memberName}' references foreign cubes: ${foreignCubes.join(', ')}. Please split and move this definition to corresponding cubes.`);
         }
@@ -160,148 +165,10 @@ export class CubeEvaluator extends CubeSymbols {
       }
 
       members[memberName] = { ...members[memberName], ownedByCube };
-    }
-  }
-
-  /**
-   * @protected
-   */
-  prepareIncludes(cube, errorReporter) {
-    if (!cube.includes && !cube.cubes) {
-      return;
-    }
-    const types = ['measures', 'dimensions', 'segments'];
-    for (const type of types) {
-      const cubeIncludes = cube.cubes && this.membersFromCubes(cube.cubes, type, errorReporter) || [];
-      const includes = cube.includes && this.membersFromIncludeExclude(cube.includes, cube.name, type) || [];
-      const excludes = cube.excludes && this.membersFromIncludeExclude(cube.excludes, cube.name, type) || [];
-      // cube includes will take precedence in case of member clash
-      const finalIncludes = this.diffByMember(this.diffByMember(includes, cubeIncludes).concat(cubeIncludes), excludes);
-      const includeMembers = this.generateIncludeMembers(finalIncludes, cube.name, type);
-      for (const [memberName, memberDefinition] of includeMembers) {
-        if (cube[type]?.[memberName]) {
-          errorReporter.error(`Included member '${memberName}' conflicts with existing member of '${cube.name}'. Please consider excluding this member.`);
-        } else {
-          cube[type][memberName] = memberDefinition;
-        }
+      if (aliasMember) {
+        members[memberName].aliasMember = aliasMember;
       }
     }
-  }
-
-  /**
-   * @protected
-   */
-  membersFromCubes(cubes, type, errorReporter) {
-    return R.unnest(cubes.map(cubeInclude => {
-      const fullPath = this.evaluateReferences(null, cubeInclude.joinPath, { collectJoinHints: true });
-      const split = fullPath.split('.');
-      const cubeReference = split[split.length - 1];
-      const cubeName = cubeInclude.alias || cubeReference;
-      let includes;
-      const fullMemberName = (memberName) => (cubeInclude.prefix ? `${cubeName}_${memberName}` : memberName);
-      if (cubeInclude.includes === '*') {
-        const membersObj = this.symbols[cubeReference]?.cubeObj()?.[type] || {};
-        includes = Object.keys(membersObj).map(memberName => ({ member: `${fullPath}.${memberName}`, name: fullMemberName(memberName) }));
-      } else {
-        includes = cubeInclude.includes.map(include => {
-          const member = include.alias || include;
-          if (member.indexOf('.') !== -1) {
-            errorReporter.error(`Paths aren't allowed in cube includes but '${member}' provided as include member`);
-          }
-          const name = fullMemberName(include.alias || member);
-          if (include.name) {
-            const resolvedMember = this.symbols[cubeReference]?.cubeObj()?.[type]?.[include.name];
-            return resolvedMember ? {
-              member: `${fullPath}.${include.name}`,
-              name,
-            } : undefined;
-          } else {
-            const resolvedMember = this.symbols[cubeReference]?.cubeObj()?.[type]?.[include];
-            return resolvedMember ? {
-              member: `${fullPath}.${include}`,
-              name
-            } : undefined;
-          }
-        });
-      }
-
-      const excludes = (cubeInclude.excludes || []).map(exclude => {
-        if (exclude.indexOf('.') !== -1) {
-          errorReporter.error(`Paths aren't allowed in cube excludes but '${exclude}' provided as exclude member`);
-        }
-        const resolvedMember = this.symbols[cubeReference]?.cubeObj()?.[type]?.[exclude];
-        return resolvedMember ? {
-          member: `${cubeReference}.${exclude}`
-        } : undefined;
-      });
-      return this.diffByMember(includes.filter(Boolean), excludes.filter(Boolean));
-    }));
-  }
-
-  diffByMember(includes, excludes) {
-    const excludesMap = new Map();
-    for (const exclude of excludes) {
-      excludesMap.set(exclude.member, true);
-    }
-    return includes.filter(include => !excludesMap.get(include.member));
-  }
-
-  membersFromIncludeExclude(referencesFn, cubeName, type) {
-    const references = this.evaluateReferences(cubeName, referencesFn);
-    return R.unnest(references.map(ref => {
-      const path = ref.split('.');
-      if (path.length === 1) {
-        const membersObj = this.symbols[path[0]]?.cubeObj()?.[type] || {};
-        return Object.keys(membersObj).map(memberName => ({ member: `${ref}.${memberName}` }));
-      } else if (path.length === 2) {
-        const resolvedMember = this.symbols[path[0]]?.cubeObj()?.[type]?.[path[1]];
-        return resolvedMember ? [{ member: ref }] : undefined;
-      } else {
-        throw new Error(`Unexpected path length ${path.length} for ${ref}`);
-      }
-    })).filter(Boolean);
-  }
-
-  /**
-   * @protected
-   */
-  generateIncludeMembers(members, cubeName, type) {
-    return members.map(memberRef => {
-      const path = memberRef.member.split('.');
-      const resolvedMember = this.symbols[path[path.length - 2]]?.cubeObj()?.[type]?.[path[path.length - 1]];
-      if (!resolvedMember) {
-        throw new Error(`Can't resolve '${memberRef.member}' while generating include members`);
-      }
-
-      // eslint-disable-next-line no-new-func
-      const sql = new Function(path[0], `return \`\${${memberRef.member}}\`;`);
-      let memberDefinition;
-      if (type === 'measures') {
-        memberDefinition = {
-          sql,
-          type: 'number',
-          aggType: resolvedMember.type,
-          meta: resolvedMember.meta,
-          description: resolvedMember.description,
-        };
-      } else if (type === 'dimensions') {
-        memberDefinition = {
-          sql,
-          type: resolvedMember.type,
-          meta: resolvedMember.meta,
-          description: resolvedMember.description,
-        };
-      } else if (type === 'segments') {
-        memberDefinition = {
-          sql,
-          meta: resolvedMember.meta,
-          description: resolvedMember.description,
-        };
-      } else {
-        throw new Error(`Unexpected member type: ${type}`);
-      }
-      return [memberRef.name || path[path.length - 1], memberDefinition];
-    });
   }
 
   cubesByFileName(fileName) {
@@ -441,10 +308,6 @@ export class CubeEvaluator extends CubeSymbols {
     return cubeAndName[0];
   }
 
-  pathFromArray(array) {
-    return array.join('.');
-  }
-
   isInstanceOfType(type, path) {
     const cubeAndName = Array.isArray(path) ? path : path.split('.');
     return this.evaluatedCubes[cubeAndName[0]] &&
@@ -503,8 +366,9 @@ export class CubeEvaluator extends CubeSymbols {
     const cubeEvaluator = this;
 
     const cubeReferencesUsed = [];
+    const pathReferencesUsed = [];
 
-    cubeEvaluator.resolveSymbolsCall(sqlFn, (name) => {
+    const evaluatedSql = cubeEvaluator.resolveSymbolsCall(sqlFn, (name) => {
       const referencedCube = cubeEvaluator.symbols[name] && name || cube;
       const resolvedSymbol =
         cubeEvaluator.resolveSymbol(
@@ -515,52 +379,20 @@ export class CubeEvaluator extends CubeSymbols {
       if (resolvedSymbol._objectWithResolvedProperties) {
         return resolvedSymbol;
       }
-      return cubeEvaluator.pathFromArray([referencedCube, name]);
+      const path = [referencedCube, name];
+      pathReferencesUsed.push(path);
+      return cubeEvaluator.pathFromArray(path);
     }, {
       // eslint-disable-next-line no-shadow
-      sqlResolveFn: (symbol, cube, n) => cubeEvaluator.pathFromArray([cube, n]),
+      sqlResolveFn: (symbol, cube, n) => {
+        const path = [cube, n];
+        pathReferencesUsed.push(path);
+        return cubeEvaluator.pathFromArray(path);
+      },
       contextSymbols: BaseQuery.emptyParametrizedContextSymbols(this, () => '$empty_param$'),
       cubeReferencesUsed,
     });
-    return cubeReferencesUsed;
-  }
-
-  evaluateReferences(cube, referencesFn, options = {}) {
-    const cubeEvaluator = this;
-
-    const fullPath = (joinHints, path) => {
-      if (joinHints?.length > 0) {
-        return R.uniq(joinHints.concat(path));
-      } else {
-        return path;
-      }
-    };
-
-    const arrayOrSingle = cubeEvaluator.resolveSymbolsCall(referencesFn, (name) => {
-      const referencedCube = cubeEvaluator.symbols[name] && name || cube;
-      const resolvedSymbol =
-        cubeEvaluator.resolveSymbol(
-          cube,
-          name
-        );
-      // eslint-disable-next-line no-underscore-dangle
-      if (resolvedSymbol._objectWithResolvedProperties) {
-        return resolvedSymbol;
-      }
-      return cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [referencedCube, name]));
-    }, {
-      // eslint-disable-next-line no-shadow
-      sqlResolveFn: (symbol, cube, n) => cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [cube, n])),
-      // eslint-disable-next-line no-shadow
-      cubeAliasFn: (cube) => cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [cube])),
-      collectJoinHints: options.collectJoinHints,
-    });
-    if (!Array.isArray(arrayOrSingle)) {
-      return arrayOrSingle.toString();
-    }
-
-    const references = arrayOrSingle.map(p => p.toString());
-    return options.originalSorting ? references : R.sortBy(R.identity, references);
+    return { cubeReferencesUsed, pathReferencesUsed, evaluatedSql };
   }
 
   evaluatePreAggregationReferences(cube, aggregation) {
