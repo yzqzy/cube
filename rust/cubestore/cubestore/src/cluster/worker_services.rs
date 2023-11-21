@@ -9,6 +9,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +26,8 @@ pub trait Configurator: Send + Sync + 'static {
     type Config: Sync + Send + Clone + 'static;
     type ServicesRequest: Debug + Serialize + DeserializeOwned + Sync + Send + 'static;
     type ServicesResponse: Debug + Serialize + DeserializeOwned + Sync + Send + 'static;
+
+    fn setup(runtime: &Runtime);
 
     async fn configure(
         services_client: Arc<
@@ -246,12 +249,12 @@ impl<P: Callable> ServicesClientImpl<P> {
                     payload: message,
                 };
 
+                let mut broadcast_rx = message_broadcast_tx.subscribe();
+
                 if let Err(e) = sender.send(ipc_message) {
                     log::error!("Error while sending ipc service request: {:?}", e);
                     break;
                 }
-
-                let mut broadcast_rx = message_broadcast_tx.subscribe();
 
                 cube_ext::spawn(async move {
                     loop {

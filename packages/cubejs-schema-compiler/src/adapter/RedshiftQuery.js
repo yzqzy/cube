@@ -11,4 +11,13 @@ export class RedshiftQuery extends PostgresQuery {
   nowTimestampSql() {
     return 'GETDATE()';
   }
+
+  sqlTemplates() {
+    return {
+      ...super.sqlTemplates(),
+      COVAR_POP: undefined,
+      COVAR_SAMP: undefined,
+      DLOG10: 'LOG(10, {{ args_concat }})',
+    };
+  }
 }
