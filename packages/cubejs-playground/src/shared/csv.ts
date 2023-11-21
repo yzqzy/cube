@@ -47,6 +47,20 @@ export function translateCsvData(data: result[]) {
       });
     });
 
+    // hack: deduplication
+    const cache = new Set<string>([]);
+    titles.forEach((k, i) => {
+      if (cache.has(k)) {
+        titles.splice(i, 1);
+
+        csvData.forEach((item) => {
+          item.splice(i, 1);
+        });
+      }
+
+      cache.add(k);
+    });
+
     pre.push([titles, ...csvData]);
 
     return pre;
