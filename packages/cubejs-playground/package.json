@@ -1,7 +1,7 @@
 {
   "name": "@heora/cubejs-client-playground",
   "author": "Cube Dev, Inc.",
-  "version": "0.34.49",
+  "version": "0.34.50",
   "engines": {},
   "repository": {
     "type": "git",
@@ -30,7 +30,6 @@
   "license": "MIT",
   "dependencies": {
     "@graphiql/toolkit": "^0.4.3",
-    "@types/flexsearch": "0.7.3",
     "anser": "^2.1.1",
     "camel-case": "^4.1.2",
     "codemirror": "^5.65.14",

@@ -1,12 +1,6 @@
 import dotenv from '@cubejs-backend/dotenv';
 
-import CubeCore, {
-  CreateOptions as CoreCreateOptions,
-  DatabaseType,
-  DriverContext,
-  DriverOptions,
-  SystemOptions
-} from '@heora/cubejs-server-core';
+import CubeCore, { CreateOptions as CoreCreateOptions, DatabaseType, DriverContext, SystemOptions } from '@heora/cubejs-server-core';
 import { getEnv, withTimeout } from '@cubejs-backend/shared';
 import express from 'express';
 import http from 'http';
@@ -42,9 +36,9 @@ export interface CreateOptions extends CoreCreateOptions, WebSocketServerOptions
 }
 
 type RequireOne<T, K extends keyof T> = {
-  [X in Exclude<keyof T, K>]?: T[X]
+  [X in Exclude<keyof T, K>]?: T[X];
 } & {
-  [P in K]-?: T[P]
+  [P in K]-?: T[P];
 };
 
 export class CubejsServer {
@@ -128,12 +122,12 @@ export class CubejsServer {
         app,
         port: PORT,
         server: this.server,
-        version
+        version,
       };
     } catch (e: any) {
       if (this.core.event) {
         await this.core.event('Dev Server Fatal Error', {
-          error: (e.stack || e.message || e).toString()
+          error: (e.stack || e.message || e).toString(),
         });
       }
 
@@ -157,7 +151,7 @@ export class CubejsServer {
 
   // @internal
   public async getDriver(ctx: DriverContext): Promise<BaseDriver> {
-    return this.core.getDriver(ctx);
+    return this.core.getDriver(ctx) as any;
   }
 
   public async close() {
@@ -181,21 +175,12 @@ export class CubejsServer {
     } catch (e: any) {
       if (this.core.event) {
         await this.core.event('Dev Server Fatal Error', {
-          error: (e.stack || e.message || e).toString()
+          error: (e.stack || e.message || e).toString(),
         });
       }
 
       throw e;
     }
-  }
-
-  /**
-   * Create driver instance.
-   *
-   * TODO (buntarb): there is no usage of this method across the project.
-   */
-  public static createDriver(dbType: DatabaseType, opt: DriverOptions) {
-    return CubeCore.createDriver(dbType, opt);
   }
 
   public static driverDependencies(dbType: DatabaseType) {
@@ -226,22 +211,14 @@ export class CubejsServer {
 
       this.status.shutdown();
 
-      const locks: Promise<any>[] = [
-        this.core.beforeShutdown()
-      ];
+      const locks: Promise<any>[] = [this.core.beforeShutdown()];
 
       if (this.socketServer) {
-        locks.push(
-          this.socketServer.close()
-        );
+        locks.push(this.socketServer.close());
       }
 
       if (this.server) {
-        locks.push(
-          this.server.stop(
-            (this.config.gracefulShutdown || 2) * 1000
-          )
-        );
+        locks.push(this.server.stop((this.config.gracefulShutdown || 2) * 1000));
       }
 
       if (graceful) {

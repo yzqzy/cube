@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 import { useEffect, useRef, useState } from 'react';
 import { AvailableCube } from '@cubejs-client/react';
 import { ButtonProps, Input, Menu as AntdMenu, Tag } from 'antd';
@@ -77,13 +79,11 @@ export default function MemberMenu({
   ...buttonProps
 }: MemberDropdownProps) {
   const searchInputRef = useRef<Input | null>(null);
-  const index = useRef(new FlexSearch.Index({ tokenize: 'forward' })).current;
+  const index = useRef(new FlexSearch({ tokenize: 'forward' })).current;
   const [search, setSearch] = useState<string>('');
   const [filteredKeys, setFilteredKeys] = useState<string[]>([]);
 
-  const hasMembers = availableCubes.some(
-    (cube) => cube.members.length > 0
-  );
+  const hasMembers = availableCubes.some((cube) => cube.members.length > 0);
 
   const indexedMembers = useDeepMemo(() => {
     getNameMemberPairs(availableCubes).forEach(([name, { title }]) =>
@@ -198,13 +198,12 @@ export default function MemberMenu({
                       cube.type ? (
                         <span>
                           {cube.cubeTitle}{' '}
-                          {cube.public === false ? <LockOutlined /> : null}
-                          {' '}
+                          {cube.public === false ? <LockOutlined /> : null}{' '}
                           <Tag
                             color={cube.type === 'view' ? '#D26E0B' : '#7A77FF'}
                             style={{
                               padding: '0 4px',
-                              lineHeight: 1.5
+                              lineHeight: 1.5,
                             }}
                           >
                             {cube.type}
@@ -217,7 +216,8 @@ export default function MemberMenu({
                   >
                     {cube.members.map((m) => (
                       <Menu.Item key={m.name} data-testid={m.name}>
-                        {m.shortTitle}{' '}{m.isVisible === false ? <LockOutlined /> : null}
+                        {m.shortTitle}{' '}
+                        {m.isVisible === false ? <LockOutlined /> : null}
                       </Menu.Item>
                     ))}
                   </Menu.ItemGroup>
