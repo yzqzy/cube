@@ -24,17 +24,21 @@ export interface Request<Meta> {
 
 export interface CheckAuthResponse {
     password: string | null,
-    superuser: boolean
+    superuser: boolean,
+    securityContext: any,
+    skipPasswordCheck?: boolean,
 }
 
 export interface CheckAuthPayload {
     request: Request<undefined>,
-    user: string | null
+    user: string | null,
+    password: string | null,
 }
 
 export interface SessionContext {
     user: string | null,
     superuser: boolean,
+    securityContext: any,
 }
 
 export interface LoadPayload {
@@ -55,8 +59,16 @@ export interface SqlApiLoadPayload {
     request: Request<LoadRequestMeta>,
     session: SessionContext,
     query: any,
+    queryKey: any,
     sqlQuery: any,
     streaming: boolean,
+}
+
+export interface LogLoadEventPayload {
+  request: Request<LoadRequestMeta>,
+  session: SessionContext,
+  event: string,
+  properties: any,
 }
 
 export interface MetaPayload {
@@ -79,6 +91,7 @@ export type SQLInterfaceOptions = {
     meta: (payload: MetaPayload) => unknown | Promise<unknown>,
     stream: (payload: LoadPayload) => unknown | Promise<unknown>,
     sqlApiLoad: (payload: SqlApiLoadPayload) => unknown | Promise<unknown>,
+    logLoadEvent: (payload: LogLoadEventPayload) => unknown | Promise<unknown>,
     sqlGenerators: (paramsJson: string) => unknown | Promise<unknown>,
     canSwitchUserForSession: (payload: CanSwitchUserPayload) => unknown | Promise<unknown>,
 };
@@ -306,6 +319,7 @@ export const registerInterface = async (options: SQLInterfaceOptions): Promise<S
     stream: wrapNativeFunctionWithStream(options.stream),
     sqlApiLoad: wrapNativeFunctionWithStream(options.sqlApiLoad),
     sqlGenerators: wrapRawNativeFunctionWithChannelCallback(options.sqlGenerators),
+    logLoadEvent: wrapRawNativeFunctionWithChannelCallback(options.logLoadEvent),
     canSwitchUserForSession: wrapRawNativeFunctionWithChannelCallback(options.canSwitchUserForSession),
   });
 };
@@ -388,30 +402,30 @@ export interface JinjaEngine {
 }
 
 export class NativeInstance {
-    protected native: any | null = null;
+  protected native: any | null = null;
 
-    protected getNative(): any {
-      if (this.native) {
-        return this.native;
-      }
-
-      this.native = loadNative();
-
+  protected getNative(): any {
+    if (this.native) {
       return this.native;
     }
 
-    public newJinjaEngine(options: JinjaEngineOptions): JinjaEngine {
-      return this.getNative().newJinjaEngine(options);
-    }
+    this.native = loadNative();
 
-    public loadPythonContext(fileName: string, content: unknown): Promise<PythonCtx> {
-      if (isFallbackBuild()) {
-        throw new Error(
-          'Python (loadPythonContext) is not supported because you are using the fallback build of native extension. Read more: ' +
+    return this.native;
+  }
+
+  public newJinjaEngine(options: JinjaEngineOptions): JinjaEngine {
+    return this.getNative().newJinjaEngine(options);
+  }
+
+  public loadPythonContext(fileName: string, content: unknown): Promise<PythonCtx> {
+    if (isFallbackBuild()) {
+      throw new Error(
+        'Python (loadPythonContext) is not supported because you are using the fallback build of native extension. Read more: ' +
           'https://github.com/cube-js/cube/blob/master/packages/cubejs-backend-native/README.md#supported-architectures-and-platforms'
-        );
-      }
-
-      return this.getNative().pythonLoadModel(fileName, content);
+      );
     }
+
+    return this.getNative().pythonLoadModel(fileName, content);
+  }
 }

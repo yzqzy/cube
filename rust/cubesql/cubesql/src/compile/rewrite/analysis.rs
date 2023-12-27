@@ -2,14 +2,16 @@ use crate::{
     compile::{
         engine::provider::CubeContext,
         rewrite::{
-            converter::{is_expr_node, node_to_expr},
-            expr_column_name, AliasExprAlias, AllMembersAlias, AllMembersCube, ChangeUserCube,
-            ColumnExprColumn, DimensionName, FilterMemberMember, FilterMemberOp, LiteralExprValue,
-            LiteralMemberRelation, LogicalPlanLanguage, MeasureName, SegmentName,
-            TableScanSourceTableName, TimeDimensionName, VirtualFieldCube, VirtualFieldName,
+            converter::{is_expr_node, node_to_expr, LogicalPlanToLanguageConverter},
+            expr_column_name, AggregateUDFExprFun, AliasExprAlias, AllMembersAlias, AllMembersCube,
+            ChangeUserCube, ColumnExprColumn, DimensionName, FilterMemberMember, FilterMemberOp,
+            LiteralExprValue, LiteralMemberRelation, LiteralMemberValue, LogicalPlanLanguage,
+            MeasureName, ScalarFunctionExprFun, SegmentName, TableScanSourceTableName,
+            TimeDimensionDateRange, TimeDimensionGranularity, TimeDimensionName, VirtualFieldCube,
+            VirtualFieldName,
         },
     },
-    transport::V1CubeMetaExt,
+    transport::ext::{V1CubeMetaDimensionExt, V1CubeMetaMeasureExt, V1CubeMetaSegmentExt},
     var_iter, CubeError,
 };
 use datafusion::{
@@ -20,7 +22,9 @@ use datafusion::{
     },
     logical_plan::{Column, DFSchema, Expr},
     physical_plan::{
-        functions::Volatility, planner::DefaultPhysicalPlanner, ColumnarValue, PhysicalPlanner,
+        functions::{BuiltinScalarFunction, Volatility},
+        planner::DefaultPhysicalPlanner,
+        ColumnarValue, PhysicalPlanner,
     },
     scalar::ScalarValue,
 };
@@ -30,7 +34,8 @@ use std::{fmt::Debug, ops::Index, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct LogicalPlanData {
     pub original_expr: Option<Expr>,
-    pub member_name_to_expr: Option<Vec<(Option<String>, Expr)>>,
+    pub member_name_to_expr: Option<Vec<(Option<String>, Member, Expr)>>,
+    pub trivial_push_down: Option<usize>,
     pub column: Option<Column>,
     pub expr_to_alias: Option<Vec<(Expr, String, Option<bool>)>>,
     pub referenced_expr: Option<Vec<Expr>>,
@@ -45,6 +50,164 @@ pub struct LogicalPlanData {
 pub enum ConstantFolding {
     Scalar(ScalarValue),
     List(Vec<ScalarValue>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Member {
+    Dimension {
+        name: String,
+        expr: Expr,
+    },
+    Measure {
+        name: String,
+        expr: Expr,
+    },
+    Segment {
+        name: String,
+        expr: Expr,
+    },
+    TimeDimension {
+        name: String,
+        expr: Expr,
+        granularity: Option<String>,
+        date_range: Option<Vec<String>>,
+    },
+    ChangeUser {
+        cube: String,
+        expr: Expr,
+    },
+    VirtualField {
+        name: String,
+        cube: String,
+        expr: Expr,
+    },
+    LiteralMember {
+        value: ScalarValue,
+        expr: Expr,
+        relation: Option<String>,
+    },
+}
+
+impl Member {
+    pub fn add_to_egraph(
+        &self,
+        egraph: &mut EGraph<LogicalPlanLanguage, LogicalPlanAnalysis>,
+    ) -> Result<Id, CubeError> {
+        match self {
+            Member::Dimension { name, expr } => {
+                let dimension_name = egraph.add(LogicalPlanLanguage::DimensionName(DimensionName(
+                    name.to_string(),
+                )));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::Dimension([dimension_name, expr])))
+            }
+            Member::Measure { name, expr } => {
+                let measure_name = egraph.add(LogicalPlanLanguage::MeasureName(MeasureName(
+                    name.to_string(),
+                )));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::Measure([measure_name, expr])))
+            }
+            Member::Segment { name, expr } => {
+                let segment_name = egraph.add(LogicalPlanLanguage::SegmentName(SegmentName(
+                    name.to_string(),
+                )));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::Segment([segment_name, expr])))
+            }
+            Member::TimeDimension {
+                name,
+                expr,
+                granularity,
+                date_range,
+            } => {
+                let time_dimension_name = egraph.add(LogicalPlanLanguage::TimeDimensionName(
+                    TimeDimensionName(name.to_string()),
+                ));
+                let time_dimension_granularity =
+                    egraph.add(LogicalPlanLanguage::TimeDimensionGranularity(
+                        TimeDimensionGranularity(granularity.clone()),
+                    ));
+                let time_dimension_date_range =
+                    egraph.add(LogicalPlanLanguage::TimeDimensionDateRange(
+                        TimeDimensionDateRange(date_range.clone()),
+                    ));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::TimeDimension([
+                    time_dimension_name,
+                    time_dimension_granularity,
+                    time_dimension_date_range,
+                    expr,
+                ])))
+            }
+            Member::ChangeUser { cube, expr } => {
+                let change_user_cube = egraph.add(LogicalPlanLanguage::ChangeUserCube(
+                    ChangeUserCube(cube.to_string()),
+                ));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::ChangeUser([change_user_cube, expr])))
+            }
+            Member::LiteralMember {
+                value,
+                expr,
+                relation,
+            } => {
+                let literal_member_value = egraph.add(LogicalPlanLanguage::LiteralMemberValue(
+                    LiteralMemberValue(value.clone()),
+                ));
+                let literal_member_relation =
+                    egraph.add(LogicalPlanLanguage::LiteralMemberRelation(
+                        LiteralMemberRelation(relation.clone()),
+                    ));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::LiteralMember([
+                    literal_member_value,
+                    expr,
+                    literal_member_relation,
+                ])))
+            }
+            Member::VirtualField { name, cube, expr } => {
+                let virtual_field_name = egraph.add(LogicalPlanLanguage::VirtualFieldName(
+                    VirtualFieldName(name.to_string()),
+                ));
+                let virtual_field_cube = egraph.add(LogicalPlanLanguage::VirtualFieldCube(
+                    VirtualFieldCube(cube.to_string()),
+                ));
+                let expr = LogicalPlanToLanguageConverter::add_expr(egraph, &expr)?;
+                Ok(egraph.add(LogicalPlanLanguage::VirtualField([
+                    virtual_field_name,
+                    virtual_field_cube,
+                    expr,
+                ])))
+            }
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Member::Dimension { name, .. } => Some(name),
+            Member::Measure { name, .. } => Some(name),
+            Member::Segment { name, .. } => Some(name),
+            Member::TimeDimension { name, .. } => Some(name),
+            Member::ChangeUser { .. } => None,
+            Member::VirtualField { name, .. } => Some(name),
+            Member::LiteralMember { .. } => None,
+        }
+    }
+
+    pub fn cube(&self) -> Option<String> {
+        match self {
+            Member::Dimension { name, .. }
+            | Member::Measure { name, .. }
+            | Member::Segment { name, .. }
+            | Member::TimeDimension { name, .. } => {
+                Some(name.split(".").next().unwrap().to_string())
+            }
+            Member::ChangeUser { cube, .. } => Some(cube.clone()),
+            Member::VirtualField { cube, .. } => Some(cube.clone()),
+            Member::LiteralMember { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -105,10 +268,69 @@ impl LogicalPlanAnalysis {
         original_expr
     }
 
+    fn make_trivial_push_down(
+        egraph: &EGraph<LogicalPlanLanguage, Self>,
+        enode: &LogicalPlanLanguage,
+    ) -> Option<usize> {
+        let trivial_push_down = |id| egraph.index(id).data.trivial_push_down.clone();
+        match enode {
+            LogicalPlanLanguage::ColumnExpr(_) => Some(0),
+            LogicalPlanLanguage::LiteralExpr(_) => Some(0),
+            LogicalPlanLanguage::AliasExpr(params) => trivial_push_down(params[0]),
+            LogicalPlanLanguage::ProjectionExpr(params)
+            | LogicalPlanLanguage::AggregateAggrExpr(params)
+            | LogicalPlanLanguage::AggregateGroupExpr(params)
+            | LogicalPlanLanguage::AggregateFunctionExprArgs(params)
+            | LogicalPlanLanguage::AggregateUDFExprArgs(params) => {
+                let mut trivial = 0;
+                for id in params.iter() {
+                    trivial = trivial_push_down(*id)?.max(trivial);
+                }
+                Some(trivial)
+            }
+            LogicalPlanLanguage::ScalarFunctionExprFun(ScalarFunctionExprFun(fun)) => {
+                if fun == &BuiltinScalarFunction::DateTrunc {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            LogicalPlanLanguage::ScalarFunctionExpr(params) => {
+                let mut trivial = 0;
+                for id in params.iter() {
+                    trivial = trivial_push_down(*id)?.max(trivial);
+                }
+                Some(trivial + 1)
+            }
+            LogicalPlanLanguage::ScalarFunctionExprArgs(params) => {
+                let mut trivial = 0;
+                for id in params.iter() {
+                    trivial = trivial_push_down(*id)?.max(trivial);
+                }
+                Some(trivial)
+            }
+            LogicalPlanLanguage::AggregateUDFExprFun(AggregateUDFExprFun(fun)) => {
+                if fun.to_lowercase() == "measure" {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            LogicalPlanLanguage::AggregateUDFExpr(params) => {
+                let mut trivial = 0;
+                for id in params.iter() {
+                    trivial = trivial_push_down(*id)?.max(trivial);
+                }
+                Some(trivial + 1)
+            }
+            _ => None,
+        }
+    }
+
     fn make_member_name_to_expr(
         egraph: &EGraph<LogicalPlanLanguage, Self>,
         enode: &LogicalPlanLanguage,
-    ) -> Option<Vec<(Option<String>, Expr)>> {
+    ) -> Option<Vec<(Option<String>, Member, Expr)>> {
         let column_name = |id| egraph.index(id).data.column.clone();
         let id_to_column_name_to_expr = |id| egraph.index(id).data.member_name_to_expr.clone();
         let original_expr = |id| egraph.index(id).data.original_expr.clone();
@@ -136,7 +358,14 @@ impl LogicalPlanAnalysis {
                 if let Some(_) = column_name(params[1]) {
                     let expr = original_expr(params[1])?;
                     let measure_name = var_iter!(egraph[params[0]], MeasureName).next().unwrap();
-                    map.push((Some(measure_name.to_string()), expr.clone()));
+                    map.push((
+                        Some(measure_name.to_string()),
+                        Member::Measure {
+                            name: measure_name.clone(),
+                            expr: expr.clone(),
+                        },
+                        expr.clone(),
+                    ));
                     Some(map)
                 } else {
                     None
@@ -147,7 +376,14 @@ impl LogicalPlanAnalysis {
                     let expr = original_expr(params[1])?;
                     let dimension_name =
                         var_iter!(egraph[params[0]], DimensionName).next().unwrap();
-                    map.push((Some(dimension_name.to_string()), expr));
+                    map.push((
+                        Some(dimension_name.to_string()),
+                        Member::Dimension {
+                            name: dimension_name.clone(),
+                            expr: expr.clone(),
+                        },
+                        expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -157,7 +393,14 @@ impl LogicalPlanAnalysis {
                 if let Some(_) = column_name(params[1]) {
                     let expr = original_expr(params[1])?;
                     let segment_name = var_iter!(egraph[params[0]], SegmentName).next().unwrap();
-                    map.push((Some(segment_name.to_string()), expr));
+                    map.push((
+                        Some(segment_name.to_string()),
+                        Member::Segment {
+                            name: segment_name.clone(),
+                            expr: expr.clone(),
+                        },
+                        expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -167,7 +410,14 @@ impl LogicalPlanAnalysis {
                 if let Some(_) = column_name(params[1]) {
                     let expr = original_expr(params[1])?;
                     let cube = var_iter!(egraph[params[0]], ChangeUserCube).next().unwrap();
-                    map.push((Some(format!("{}.__user", cube)), expr));
+                    map.push((
+                        Some(format!("{}.__user", cube)),
+                        Member::ChangeUser {
+                            cube: cube.clone(),
+                            expr: expr.clone(),
+                        },
+                        expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -182,7 +432,15 @@ impl LogicalPlanAnalysis {
                         .next()
                         .unwrap();
                     let expr = original_expr(params[2])?;
-                    map.push((Some(format!("{}.{}", cube, field_name.to_string())), expr));
+                    map.push((
+                        Some(format!("{}.{}", cube, field_name.to_string())),
+                        Member::VirtualField {
+                            name: field_name.to_string(),
+                            cube: cube.to_string(),
+                            expr: expr.clone(),
+                        },
+                        expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -198,15 +456,85 @@ impl LogicalPlanAnalysis {
                         .cube_context
                         .meta
                         .find_cube_with_name(&cube)?;
-                    for column in cube.get_columns().iter() {
+                    for measure in cube.measures.iter() {
                         map.push((
-                            Some(format!("{}.{}", cube.name, column.get_name())),
+                            Some(measure.name.clone()),
+                            Member::Measure {
+                                name: measure.name.clone(),
+                                expr: Expr::Column(Column {
+                                    relation: Some(alias.to_string()),
+                                    name: measure.get_real_name(),
+                                }),
+                            },
                             Expr::Column(Column {
                                 relation: Some(alias.to_string()),
-                                name: column.get_name().to_string(),
+                                name: measure.get_real_name(),
                             }),
                         ));
                     }
+                    for dimension in cube.dimensions.iter() {
+                        map.push((
+                            Some(dimension.name.clone()),
+                            Member::Dimension {
+                                name: dimension.name.clone(),
+                                expr: Expr::Column(Column {
+                                    relation: Some(alias.to_string()),
+                                    name: dimension.get_real_name(),
+                                }),
+                            },
+                            Expr::Column(Column {
+                                relation: Some(alias.to_string()),
+                                name: dimension.get_real_name(),
+                            }),
+                        ));
+                    }
+                    for segment in cube.segments.iter() {
+                        map.push((
+                            Some(segment.name.clone()),
+                            Member::Segment {
+                                name: segment.name.clone(),
+                                expr: Expr::Column(Column {
+                                    relation: Some(alias.to_string()),
+                                    name: segment.get_real_name(),
+                                }),
+                            },
+                            Expr::Column(Column {
+                                relation: Some(alias.to_string()),
+                                name: segment.get_real_name(),
+                            }),
+                        ));
+                    }
+
+                    map.push((
+                        Some(format!("{}.{}", cube.name, "__user")),
+                        Member::ChangeUser {
+                            cube: cube.name.clone(),
+                            expr: Expr::Column(Column {
+                                relation: Some(alias.to_string()),
+                                name: "__user".to_string(),
+                            }),
+                        },
+                        Expr::Column(Column {
+                            relation: Some(alias.to_string()),
+                            name: "__user".to_string(),
+                        }),
+                    ));
+
+                    map.push((
+                        Some(format!("{}.{}", cube.name, "__cubeJoinField")),
+                        Member::VirtualField {
+                            name: "__cubeJoinField".to_string(),
+                            cube: cube.name.clone(),
+                            expr: Expr::Column(Column {
+                                relation: Some(alias.to_string()),
+                                name: "__cubeJoinField".to_string(),
+                            }),
+                        },
+                        Expr::Column(Column {
+                            relation: Some(alias.to_string()),
+                            name: "__cubeJoinField".to_string(),
+                        }),
+                    ));
                     Some(map)
                 } else {
                     None
@@ -218,7 +546,24 @@ impl LogicalPlanAnalysis {
                     let time_dimension_name = var_iter!(egraph[params[0]], TimeDimensionName)
                         .next()
                         .unwrap();
-                    map.push((Some(time_dimension_name.to_string()), expr));
+                    let time_dimension_granularity =
+                        var_iter!(egraph[params[1]], TimeDimensionGranularity)
+                            .next()
+                            .unwrap();
+                    let time_dimension_date_range =
+                        var_iter!(egraph[params[2]], TimeDimensionDateRange)
+                            .next()
+                            .unwrap();
+                    map.push((
+                        Some(time_dimension_name.to_string()),
+                        Member::TimeDimension {
+                            name: time_dimension_name.clone(),
+                            expr: expr.clone(),
+                            granularity: time_dimension_granularity.clone(),
+                            date_range: time_dimension_date_range.clone(),
+                        },
+                        expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -226,13 +571,24 @@ impl LogicalPlanAnalysis {
             }
             LogicalPlanLanguage::LiteralMember(params) => {
                 if let Some(relation) = literal_member_relation(params[2]) {
+                    let scalar_value = var_iter!(egraph[params[0]], LiteralMemberValue)
+                        .next()
+                        .unwrap();
                     let expr = original_expr(params[1])?;
                     let name = expr_column_name(expr, &None);
                     let column_expr = Expr::Column(Column {
                         relation: relation.clone(),
                         name,
                     });
-                    map.push((None, column_expr));
+                    map.push((
+                        None,
+                        Member::LiteralMember {
+                            value: scalar_value.clone(),
+                            expr: column_expr.clone(),
+                            relation: relation.clone(),
+                        },
+                        column_expr,
+                    ));
                     Some(map)
                 } else {
                     None
@@ -486,7 +842,23 @@ impl LogicalPlanAnalysis {
                 )
                 .ok()?;
                 if let Expr::ScalarUDF { fun, .. } = &expr {
-                    if &fun.name == "str_to_date"
+                    if &fun.name == "eval_now" {
+                        Self::eval_constant_expr(
+                            &egraph,
+                            &Expr::ScalarFunction {
+                                fun: BuiltinScalarFunction::Now,
+                                args: vec![],
+                            },
+                        )
+                    } else if &fun.name == "eval_current_date" {
+                        Self::eval_constant_expr(
+                            &egraph,
+                            &Expr::ScalarFunction {
+                                fun: BuiltinScalarFunction::CurrentDate,
+                                args: vec![],
+                            },
+                        )
+                    } else if &fun.name == "str_to_date"
                         || &fun.name == "date_add"
                         || &fun.name == "date_sub"
                         || &fun.name == "date"
@@ -511,8 +883,12 @@ impl LogicalPlanAnalysis {
                 .ok()?;
 
                 if let Expr::ScalarFunction { fun, .. } = &expr {
-                    if fun.volatility() == Volatility::Immutable
-                        || fun.volatility() == Volatility::Stable
+                    if (fun.volatility() == Volatility::Immutable
+                        || fun.volatility() == Volatility::Stable)
+                        && !matches!(
+                            fun,
+                            BuiltinScalarFunction::CurrentDate | BuiltinScalarFunction::Now
+                        )
                     {
                         Self::eval_constant_expr(&egraph, &expr)
                     } else {
@@ -562,6 +938,7 @@ impl LogicalPlanAnalysis {
                         Expr::Literal(ScalarValue::Utf8(value)) => match (value, data_type) {
                             // Timezone set in Config
                             (Some(_), DataType::Timestamp(_, _)) => (),
+                            (Some(_), DataType::Date32 | DataType::Date64) => (),
                             _ => return None,
                         },
                         _ => (),
@@ -768,6 +1145,7 @@ impl Analysis<LogicalPlanLanguage> for LogicalPlanAnalysis {
         LogicalPlanData {
             original_expr: Self::make_original_expr(egraph, enode),
             member_name_to_expr: Self::make_member_name_to_expr(egraph, enode),
+            trivial_push_down: Self::make_trivial_push_down(egraph, enode),
             column: Self::make_column_name(egraph, enode),
             expr_to_alias: Self::make_expr_to_alias(egraph, enode),
             referenced_expr: Self::make_referenced_expr(egraph, enode),
@@ -783,6 +1161,7 @@ impl Analysis<LogicalPlanLanguage> for LogicalPlanAnalysis {
         let (original_expr, b) = self.merge_option_field(a, b, |d| &mut d.original_expr);
         let (member_name_to_expr, b) =
             self.merge_option_field(a, b, |d| &mut d.member_name_to_expr);
+        let (trivial_push_down, b) = self.merge_option_field(a, b, |d| &mut d.trivial_push_down);
         let (column_name_to_alias, b) = self.merge_option_field(a, b, |d| &mut d.expr_to_alias);
         let (referenced_columns, b) = self.merge_option_field(a, b, |d| &mut d.referenced_expr);
         let (constant_in_list, b) = self.merge_option_field(a, b, |d| &mut d.constant_in_list);
@@ -793,6 +1172,7 @@ impl Analysis<LogicalPlanLanguage> for LogicalPlanAnalysis {
         let (column_name, _) = self.merge_option_field(a, b, |d| &mut d.column);
         original_expr
             | member_name_to_expr
+            | trivial_push_down
             | column_name_to_alias
             | referenced_columns
             | constant_in_list
@@ -805,10 +1185,30 @@ impl Analysis<LogicalPlanLanguage> for LogicalPlanAnalysis {
 
     fn modify(egraph: &mut EGraph<LogicalPlanLanguage, Self>, id: Id) {
         if let Some(ConstantFolding::Scalar(c)) = &egraph[id].data.constant {
+            // TODO: ideally all constants should be aliased, but this requires
+            // rewrites to extract `.data.constant` instead of `literal_expr`.
+            let alias_name =
+                if c.is_null() || matches!(c, ScalarValue::Date32(_) | ScalarValue::Date64(_)) {
+                    egraph[id]
+                        .data
+                        .original_expr
+                        .as_ref()
+                        .map(|expr| expr.name(&DFSchema::empty()).unwrap())
+                } else {
+                    None
+                };
             let c = c.clone();
             let value = egraph.add(LogicalPlanLanguage::LiteralExprValue(LiteralExprValue(c)));
             let literal_expr = egraph.add(LogicalPlanLanguage::LiteralExpr([value]));
-            egraph.union(id, literal_expr);
+            if let Some(alias_name) = alias_name {
+                let alias = egraph.add(LogicalPlanLanguage::AliasExprAlias(AliasExprAlias(
+                    alias_name,
+                )));
+                let alias_expr = egraph.add(LogicalPlanLanguage::AliasExpr([literal_expr, alias]));
+                egraph.union(id, alias_expr);
+            } else {
+                egraph.union(id, literal_expr);
+            }
         }
     }
 }

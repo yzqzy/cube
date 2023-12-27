@@ -3,6 +3,98 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [0.34.40](https://github.com/cube-js/cube.js/compare/v0.34.39...v0.34.40) (2023-12-21)
+
+
+### Features
+
+* **cubesql:** Do not run split re-aggregate for trivial push down to improve wide table queries ([#7567](https://github.com/cube-js/cube.js/issues/7567)) ([8dbf879](https://github.com/cube-js/cube.js/commit/8dbf87986cd58f4860d647d5a0bb33e64a229db1))
+
+
+
+
+
+## [0.34.37](https://github.com/cube-js/cube.js/compare/v0.34.36...v0.34.37) (2023-12-19)
+
+
+### Features
+
+* **cubesql:** Avoid pushing split down for trivial selects to optimi… ([#7556](https://github.com/cube-js/cube.js/issues/7556)) ([2bf86e5](https://github.com/cube-js/cube.js/commit/2bf86e5a70810f5f081a527d6e7b70c8020673aa))
+
+
+
+
+
+## [0.34.36](https://github.com/cube-js/cube.js/compare/v0.34.35...v0.34.36) (2023-12-16)
+
+
+### Bug Fixes
+
+* **cubesql:** Improve performance for wide table querying ([#7534](https://github.com/cube-js/cube.js/issues/7534)) ([0f877d4](https://github.com/cube-js/cube.js/commit/0f877d41f08aeb1ebc9b22e9b38da931152435d2))
+
+
+
+
+
+## [0.34.35](https://github.com/cube-js/cube.js/compare/v0.34.34...v0.34.35) (2023-12-13)
+
+
+### Bug Fixes
+
+* **cubesql:** Support Sigma Computing table schema sync ([d87bd19](https://github.com/cube-js/cube.js/commit/d87bd19384e25a161fb2424b3b6c01da675de04e))
+
+
+### Features
+
+* **cubesql:** Additional trace event logging for SQL API ([#7524](https://github.com/cube-js/cube.js/issues/7524)) ([6b700cd](https://github.com/cube-js/cube.js/commit/6b700cd493b16d4450ce1efaa449207836a47592))
+
+
+
+
+
+## [0.34.31](https://github.com/cube-js/cube.js/compare/v0.34.30...v0.34.31) (2023-12-07)
+
+
+### Bug Fixes
+
+* **cubesql:** Avoid constant folding for current_date() function duri… ([#7498](https://github.com/cube-js/cube.js/issues/7498)) ([e86f4be](https://github.com/cube-js/cube.js/commit/e86f4be42a6e48a115c2765e0cda84fbf1cc56e7))
+
+
+### Features
+
+* **cubesql:** Support `Utf8 * Interval` expression ([ea1fa9c](https://github.com/cube-js/cube.js/commit/ea1fa9ca6e04cf12b4c334b5702d7a5a33f0c364))
+
+
+
+
+
+## [0.34.27](https://github.com/cube-js/cube.js/compare/v0.34.26...v0.34.27) (2023-11-30)
+
+
+### Features
+
+* **cubesql:** Provide password supplied by Postgres connection as a 3rd argument of `check_sql_auth()` ([#7471](https://github.com/cube-js/cube.js/issues/7471)) ([ee3c19f](https://github.com/cube-js/cube.js/commit/ee3c19f8d467056c90ee407b3ac386dc1892b678)), closes [#5430](https://github.com/cube-js/cube.js/issues/5430)
+
+
+
+
+
+## [0.34.26](https://github.com/cube-js/cube/compare/v0.34.25...v0.34.26) (2023-11-28)
+
+
+### Bug Fixes
+
+* **cubesql:** Missing template backslash escaping ([#7465](https://github.com/cube-js/cube/issues/7465)) ([4a08de5](https://github.com/cube-js/cube/commit/4a08de5791f7353b925c60ee84d2654e95e7967a))
+
+
+### Features
+
+* **cubesql:** Support SQL push down for several functions ([79e5ac8](https://github.com/cube-js/cube/commit/79e5ac8e998005ebf8b5f72ccf1d63f425f6003c))
+
+
+
+
+
 ## [0.34.23](https://github.com/cube-js/cube/compare/v0.34.22...v0.34.23) (2023-11-19)
 
 

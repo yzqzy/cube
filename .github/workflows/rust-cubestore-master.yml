@@ -142,7 +142,7 @@ jobs:
           echo ::set-output name=tags::${TAGS}
           echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
       - name: Login to DockerHub
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -255,7 +255,7 @@ jobs:
       #  env:
       #    VCPKG_ROOT: 'C:\vcpkg'
       - name: Set Env Variables for Darwin
-        uses: allenevans/set-env@v2.0.0
+        uses: allenevans/set-env@v3.0.0
         if: ${{ matrix.target == 'x86_64-apple-darwin' }}
         with:
           OPENSSL_STATIC: "true"

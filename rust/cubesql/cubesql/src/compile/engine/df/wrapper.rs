@@ -5,7 +5,8 @@ use crate::{
     },
     sql::AuthContextRef,
     transport::{
-        AliasedColumn, LoadRequestMeta, MetaContext, SqlGenerator, SqlTemplates, TransportService,
+        AliasedColumn, LoadRequestMeta, MetaContext, SpanId, SqlGenerator, SqlTemplates,
+        TransportService,
     },
     CubeError,
 };
@@ -101,6 +102,7 @@ pub struct CubeScanWrapperNode {
     pub wrapped_sql: Option<SqlQuery>,
     pub request: Option<V1LoadRequestQuery>,
     pub member_fields: Option<Vec<MemberField>>,
+    pub span_id: Option<Arc<SpanId>>,
 }
 
 impl CubeScanWrapperNode {
@@ -108,6 +110,7 @@ impl CubeScanWrapperNode {
         wrapped_plan: Arc<LogicalPlan>,
         meta: Arc<MetaContext>,
         auth_context: AuthContextRef,
+        span_id: Option<Arc<SpanId>>,
     ) -> Self {
         Self {
             wrapped_plan,
@@ -116,6 +119,7 @@ impl CubeScanWrapperNode {
             wrapped_sql: None,
             request: None,
             member_fields: None,
+            span_id,
         }
     }
 
@@ -132,6 +136,7 @@ impl CubeScanWrapperNode {
             wrapped_sql: Some(sql),
             request: Some(request),
             member_fields: Some(member_fields),
+            span_id: self.span_id.clone(),
         }
     }
 }
@@ -260,6 +265,7 @@ impl CubeScanWrapperNode {
                         }
                         let sql = transport
                             .sql(
+                                node.span_id.clone(),
                                 node.request.clone(),
                                 node.auth_context,
                                 load_request_meta.as_ref().clone(),
@@ -610,6 +616,7 @@ impl CubeScanWrapperNode {
 
                                 let sql_response = transport
                                     .sql(
+                                        ungrouped_scan_node.span_id.clone(),
                                         load_request.clone(),
                                         ungrouped_scan_node.auth_context.clone(),
                                         load_request_meta.as_ref().clone(),
@@ -739,6 +746,16 @@ impl CubeScanWrapperNode {
             sql = new_sql_query;
 
             let original_alias = expr_name(&original_expr, &schema)?;
+            let original_alias_key = Column::from_name(&original_alias);
+            if let Some(alias_column) = next_remapping.get(&original_alias_key) {
+                let alias = alias_column.name.clone();
+                aliased_columns.push(AliasedColumn {
+                    expr: expr_sql,
+                    alias,
+                });
+                continue;
+            }
+
             let alias = if can_rename_columns {
                 let alias = expr_name(&expr, &schema)?;
                 let mut truncated_alias = non_id_regex.replace_all(&alias, "_").to_lowercase();
@@ -759,10 +776,7 @@ impl CubeScanWrapperNode {
             };
             if original_alias != alias {
                 if !next_remapping.contains_key(&Column::from_name(&alias)) {
-                    next_remapping.insert(
-                        Column::from_name(&original_alias),
-                        Column::from_name(&alias),
-                    );
+                    next_remapping.insert(original_alias_key, Column::from_name(&alias));
                     next_remapping.insert(
                         Column {
                             name: original_alias.clone(),
@@ -1253,6 +1267,37 @@ impl CubeScanWrapperNode {
                     })
                 }
                 Expr::ScalarUDF { fun, args } => {
+                    let date_part_err = |dp| {
+                        DataFusionError::Internal(format!(
+                        "Can't generate SQL for scalar function: date part '{}' is not supported",
+                        dp
+                    ))
+                    };
+                    let date_part = match fun.name.as_str() {
+                        "datediff" | "dateadd" => match &args[0] {
+                            Expr::Literal(ScalarValue::Utf8(Some(date_part))) => {
+                                // Security check to prevent SQL injection
+                                if DATE_PART_REGEX.is_match(date_part) {
+                                    Ok(Some(date_part.to_string()))
+                                } else {
+                                    Err(date_part_err(date_part))
+                                }
+                            }
+                            _ => Err(date_part_err(&args[0].to_string())),
+                        },
+                        _ => Ok(None),
+                    }?;
+                    let interval = match fun.name.as_str() {
+                        "dateadd" => match &args[1] {
+                            Expr::Literal(ScalarValue::Int64(Some(interval))) => {
+                                Ok(Some(interval.to_string()))
+                            }
+                            _ => Err(DataFusionError::Internal(format!(
+                                "Can't generate SQL for scalar function: interval must be Int64"
+                            ))),
+                        },
+                        _ => Ok(None),
+                    }?;
                     let mut sql_args = Vec::new();
                     for arg in args {
                         let (sql, query) = Self::generate_sql_for_expr(
@@ -1269,7 +1314,7 @@ impl CubeScanWrapperNode {
                     Ok((
                         sql_generator
                             .get_sql_templates()
-                            .scalar_function(fun.name.to_string(), sql_args, None)
+                            .scalar_function(fun.name.to_string(), sql_args, date_part, interval)
                             .map_err(|e| {
                                 DataFusionError::Internal(format!(
                                     "Can't generate SQL for scalar function: {}",
@@ -1347,7 +1392,7 @@ impl CubeScanWrapperNode {
                     Ok((
                         sql_generator
                             .get_sql_templates()
-                            .scalar_function(fun.to_string(), sql_args, date_part)
+                            .scalar_function(fun.to_string(), sql_args, date_part, None)
                             .map_err(|e| {
                                 DataFusionError::Internal(format!(
                                     "Can't generate SQL for scalar function: {}",
@@ -1515,7 +1560,7 @@ impl CubeScanWrapperNode {
 
     fn escape_interpolation_quotes(s: String, ungrouped: bool) -> String {
         if ungrouped {
-            s.replace("`", "\\`")
+            s.replace("\\", "\\\\").replace("`", "\\`")
         } else {
             s
         }
@@ -1559,6 +1604,7 @@ impl UserDefinedLogicalNode for CubeScanWrapperNode {
             wrapped_sql: self.wrapped_sql.clone(),
             request: self.request.clone(),
             member_fields: self.member_fields.clone(),
+            span_id: self.span_id.clone(),
         })
     }
 }
