@@ -30,7 +30,7 @@ export default function MemberGroup({
 
         const buttonGroup = (
           <RemoveButtonGroup
-            key={m.index || m.name}
+            key={m.index || m.name || m.cubeTitle}
             disabled={disabled}
             className={disabled ? 'disabled' : null}
             color={isMissing ? 'danger' : 'primary'}
@@ -41,13 +41,13 @@ export default function MemberGroup({
               availableCubes={availableMembers}
               onClick={(updateWith) => updateMethods.update(m, updateWith)}
             >
-              {m.title}
+              {m.title || m.cubeTitle}
             </MemberDropdown>
           </RemoveButtonGroup>
         );
 
         return isMissing ? (
-          <MissingMemberTooltip key={m.index || m.name}>
+          <MissingMemberTooltip key={m.index || m.name || m.cubeTitle}>
             {buttonGroup}
           </MissingMemberTooltip>
         ) : (

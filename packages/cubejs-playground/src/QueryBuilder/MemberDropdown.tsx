@@ -79,18 +79,27 @@ export default function MemberMenu({
   ...buttonProps
 }: MemberDropdownProps) {
   const searchInputRef = useRef<Input | null>(null);
-  const index = useRef(new FlexSearch({ tokenize: 'forward' })).current;
+  const index = useRef(new FlexSearch.Index({ tokenize: 'forward' })).current;
   const [search, setSearch] = useState<string>('');
   const [filteredKeys, setFilteredKeys] = useState<string[]>([]);
 
   const hasMembers = availableCubes.some((cube) => cube.members.length > 0);
+  const hasDatasets = availableCubes.some((cube) => cube.dataset);
 
   const indexedMembers = useDeepMemo(() => {
     getNameMemberPairs(availableCubes).forEach(([name, { title }]) =>
       index.add(name as any, title)
     );
+    const datasetPairs = availableCubes.map((cube) => {
+      const { cubeName, cubeTitle } = cube;
+      index.add(cubeName, cubeTitle);
+      return [cubeName, cube];
+    });
 
-    return Object.fromEntries(getNameMemberPairs(availableCubes));
+    return Object.fromEntries([
+      ...getNameMemberPairs(availableCubes),
+      ...datasetPairs,
+    ]);
   }, [availableCubes]);
 
   useEffect(() => {
@@ -189,6 +198,30 @@ export default function MemberMenu({
               {members.map((cube) => {
                 if (!cube.members.length) {
                   return null;
+                }
+
+                if (hasDatasets) {
+                  return (
+                    <Menu.Item key={cube.cubeName} data-testid={cube.cubeName}>
+                      {cube.type ? (
+                        <span>
+                          {cube.cubeTitle}{' '}
+                          {cube.public === false ? <LockOutlined /> : null}{' '}
+                          <Tag
+                            color={cube.type === 'view' ? '#D26E0B' : '#7A77FF'}
+                            style={{
+                              padding: '0 4px',
+                              lineHeight: 1.5,
+                            }}
+                          >
+                            {cube.type}
+                          </Tag>
+                        </span>
+                      ) : (
+                        cube.cubeTitle
+                      )}
+                    </Menu.Item>
+                  );
                 }
 
                 return (

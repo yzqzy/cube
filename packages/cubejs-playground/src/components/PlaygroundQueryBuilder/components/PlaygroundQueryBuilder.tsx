@@ -7,8 +7,10 @@ import {
   validateQuery,
   TransformedQuery,
   getQueryMembers,
+  TCubeMeasure,
 } from '@cubejs-client/core';
 import {
+  AvailableCube,
   QueryBuilder,
   SchemaChangeProps,
   VizState,
@@ -37,7 +39,7 @@ import SelectChartType from '../../../QueryBuilder/SelectChartType';
 import TimeGroup from '../../../QueryBuilder/TimeGroup';
 import { UIFramework } from '../../../types';
 import { containsPrivateFields, dispatchPlaygroundEvent } from '../../../utils';
-import { request } from '../../../shared/request'
+import { request } from '../../../shared/request';
 import { downloadCSV, translateCsvData } from '../../../shared/csv';
 import { formatParams } from '../../../shared/helpers';
 import {
@@ -45,7 +47,6 @@ import {
   useChartRendererStateMethods,
 } from '../../QueryTabs/ChartRendererStateProvider';
 import { PreAggregationStatus } from './PreAggregationStatus';
-
 
 const Section = styled.div`
   display: flex;
@@ -99,8 +100,8 @@ export const frameworkChartLibraries: Record<
   ],
 };
 
-const playgroundActionUpdateMethods = (updateMethods, memberName) =>
-  Object.keys(updateMethods)
+const playgroundActionUpdateMethods = (updateMethods, memberName: string) => {
+  return Object.keys(updateMethods)
     .map((method) => ({
       [method]: (member, values, ...rest) => {
         let actionName = `${method
@@ -121,6 +122,7 @@ const playgroundActionUpdateMethods = (updateMethods, memberName) =>
       },
     }))
     .reduce((a, b) => ({ ...a, ...b }), {});
+};
 
 type PivotChangeEmitterProps = {
   iframeRef: RefObject<HTMLIFrameElement> | null;
@@ -229,7 +231,9 @@ export function PlaygroundQueryBuilder({
   const [framework, setFramework] = useState<UIFramework>('react');
   const [chartingLibrary, setChartingLibrary] = useState<string>('chartjs');
 
-  const [disabled, setDisabled] = useState(false)
+  const [disabled, setDisabled] = useState(false);
+
+  const [datasets, setDatasets] = useState<AvailableCube<TCubeMeasure>[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -283,42 +287,44 @@ export function PlaygroundQueryBuilder({
   }
 
   function handleDownload({ query }) {
-    setDisabled(true)
+    setDisabled(true);
 
     const params = {
-      query: JSON.stringify(Object.assign(query, {
-        limit: 1000 * 10
-      })),
-      queryType: "multi"
-    }
+      query: JSON.stringify(
+        Object.assign(query, {
+          limit: 1000 * 10,
+        })
+      ),
+      queryType: 'multi',
+    };
 
     const error = () => {
-      setDisabled(false)
-      message.error('下载失败，请稍后重试！！！')
-    }
+      setDisabled(false);
+      message.error('下载失败，请稍后重试！！！');
+    };
 
     const next = async (retry = 3) => {
-      const res = await request(`cubejs-api/v1/load?${formatParams(params)}`)
+      const res = await request(`cubejs-api/v1/load?${formatParams(params)}`);
 
       if (!res.ok || res.json.error) {
         if (res.json.error === 'Continue wait' && retry) {
           return setTimeout(next.bind(null, retry - 1), 300);
         }
-        return error()
+        return error();
       }
 
-      const data = translateCsvData(res.json.results)
+      const data = translateCsvData(res.json.results);
 
       if (Array.isArray(data)) {
         while (data.length) {
-          await downloadCSV(data.pop(), `data_${Date.now()}.csv`)
+          await downloadCSV(data.pop(), `data_${Date.now()}.csv`);
         }
       }
 
-      setDisabled(false)
-    }
+      setDisabled(false);
+    };
 
-    next()
+    next();
   }
 
   if (!tokenRefreshed) {
@@ -365,6 +371,20 @@ export function PlaygroundQueryBuilder({
       }) => {
         let parsedDateRange;
 
+        const pageAvailbeMembers = {
+          ...availableMembers,
+          datasets:
+            availableMembers.measures.map((item) => ({
+              dataset: true,
+              ...item,
+            })) || [],
+          measures: availableMembers.measures.filter((item) =>
+            datasets.length
+              ? datasets.some((dataset) => item.cubeName === dataset.cubeName)
+              : true
+          ),
+        };
+
         if (dryRunResponse) {
           const { timeDimensions = [] } = dryRunResponse.pivotQuery || {};
           parsedDateRange = timeDimensions[0]?.dateRange;
@@ -377,6 +397,17 @@ export function PlaygroundQueryBuilder({
           getQueryMembers(query),
           meta
         );
+
+        const updateDatasets = {
+          add: (member) => {
+            setDatasets([member]);
+          },
+          remove: (member) => {
+            setDatasets(
+              datasets.filter((item) => item.cubeName !== member.cubeName)
+            );
+          },
+        };
 
         const queriesEqual = areQueriesEqual(
           validateQuery(query),
@@ -395,11 +426,26 @@ export function PlaygroundQueryBuilder({
                 <Card bordered={false} style={{ borderRadius: 0 }}>
                   <Row align="top" gutter={0} style={{ marginBottom: -12 }}>
                     <Section>
+                      <SectionHeader>Datasets</SectionHeader>
+                      <MemberGroup
+                        disabled={isFetchingMeta}
+                        members={datasets}
+                        availableMembers={pageAvailbeMembers.datasets || []}
+                        missingMembers={missingMembers}
+                        addMemberName="Dataset"
+                        updateMethods={playgroundActionUpdateMethods(
+                          updateDatasets,
+                          'Dataset'
+                        )}
+                      />
+                    </Section>
+
+                    <Section>
                       <SectionHeader>Measures</SectionHeader>
                       <MemberGroup
                         disabled={isFetchingMeta}
                         members={measures}
-                        availableMembers={availableMembers?.measures || []}
+                        availableMembers={pageAvailbeMembers.measures || []}
                         missingMembers={missingMembers}
                         addMemberName="Measure"
                         updateMethods={playgroundActionUpdateMethods(
@@ -414,7 +460,7 @@ export function PlaygroundQueryBuilder({
                       <MemberGroup
                         disabled={isFetchingMeta}
                         members={dimensions}
-                        availableMembers={availableMembers?.dimensions || []}
+                        availableMembers={pageAvailbeMembers?.dimensions || []}
                         missingMembers={missingMembers}
                         addMemberName="Dimension"
                         updateMethods={playgroundActionUpdateMethods(
@@ -429,7 +475,7 @@ export function PlaygroundQueryBuilder({
                       <MemberGroup
                         disabled={isFetchingMeta}
                         members={segments}
-                        availableMembers={availableMembers?.segments || []}
+                        availableMembers={pageAvailbeMembers?.segments || []}
                         missingMembers={missingMembers}
                         addMemberName="Segment"
                         updateMethods={playgroundActionUpdateMethods(
@@ -445,7 +491,7 @@ export function PlaygroundQueryBuilder({
                         disabled={isFetchingMeta}
                         members={timeDimensions}
                         availableMembers={
-                          availableMembers?.timeDimensions || []
+                          pageAvailbeMembers?.timeDimensions || []
                         }
                         missingMembers={missingMembers}
                         addMemberName="Time"
@@ -561,7 +607,7 @@ export function PlaygroundQueryBuilder({
                           onClick={async () => {
                             await refreshToken();
 
-                            handleDownload({ query: validateQuery(query) })
+                            handleDownload({ query: validateQuery(query) });
                           }}
                         >
                           Download
