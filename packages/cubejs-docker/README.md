@@ -72,7 +72,7 @@ docker run -p 4000:4000 \
   -p 15432:15432 \
   -v ${PWD}:/cube/conf \
   -e CUBEJS_DEV_MODE=true \
-  heora/cubejs-cube:latest
+  yzqzy/cubejs-cube:latest
 ```
 
 ```bash
@@ -83,7 +83,7 @@ docker run -p 4000:4000 \
   -e AUTH=true \
   -e AUTH_PUBLIC_KEY=xxxx \
   -e AUTH_DOMAIN=xxxx \
-  heora/cubejs-cube:latest
+  yzqzy/cubejs-cube:latest
 ```
 
 ### Using Docker Compose
