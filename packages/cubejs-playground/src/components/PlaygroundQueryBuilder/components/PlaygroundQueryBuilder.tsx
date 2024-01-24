@@ -327,6 +327,13 @@ export function PlaygroundQueryBuilder({
     next();
   }
 
+  const memberFilter = (members: AvailableCube<any>[]) =>
+    members.filter((item) =>
+      datasets.length
+        ? datasets.some((dataset) => item.cubeName === dataset.cubeName)
+        : true
+    );
+
   if (!tokenRefreshed) {
     return null;
   }
@@ -378,11 +385,10 @@ export function PlaygroundQueryBuilder({
               dataset: true,
               ...item,
             })) || [],
-          measures: availableMembers.measures.filter((item) =>
-            datasets.length
-              ? datasets.some((dataset) => item.cubeName === dataset.cubeName)
-              : true
-          ),
+          measures: memberFilter(availableMembers.measures),
+          dimensions: memberFilter(availableMembers.dimensions),
+          segments: memberFilter(availableMembers.segments),
+          timeDimensions: memberFilter(availableMembers.timeDimensions),
         };
 
         if (dryRunResponse) {
@@ -508,7 +514,7 @@ export function PlaygroundQueryBuilder({
                       <FilterGroup
                         disabled={isFetchingMeta}
                         members={filters}
-                        availableMembers={availableFilterMembers}
+                        availableMembers={memberFilter(availableFilterMembers)}
                         missingMembers={missingMembers}
                         addMemberName="Filter"
                         updateMethods={playgroundActionUpdateMethods(
