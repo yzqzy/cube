@@ -79,7 +79,7 @@ export default function MemberMenu({
   ...buttonProps
 }: MemberDropdownProps) {
   const searchInputRef = useRef<Input | null>(null);
-  const index = useRef(new FlexSearch.Index({ tokenize: 'forward' })).current;
+  const index = useRef(new FlexSearch({ tokenize: 'forward' })).current;
   const [search, setSearch] = useState<string>('');
   const [filteredKeys, setFilteredKeys] = useState<string[]>([]);
 
